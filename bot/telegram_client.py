@@ -22,6 +22,15 @@ async def send_message(chat_id: int | str, text: str) -> None:
         resp.raise_for_status()
 
 
+async def set_my_commands(commands: list[dict]) -> dict:
+    """Register the bot's command menu (the list shown when typing '/')."""
+    api = f"{_API_BASE}/bot{_token()}/setMyCommands"
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.post(api, json={"commands": commands})
+        resp.raise_for_status()
+        return resp.json()
+
+
 async def set_webhook(url: str, secret_token: str | None = None) -> dict:
     """Register ``url`` as this bot's webhook with Telegram."""
     api = f"{_API_BASE}/bot{_token()}/setWebhook"
