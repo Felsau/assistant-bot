@@ -20,6 +20,14 @@ app = FastAPI(title="Personal Assistant Bot")
 
 _WEBHOOK_SECRET = os.environ.get("TELEGRAM_WEBHOOK_SECRET")
 
+# The command menu shown in Telegram when the user types "/".
+_BOT_COMMANDS = [
+    {"command": "start", "description": "Start and see what I can do"},
+    {"command": "help", "description": "How to use me"},
+    {"command": "today", "description": "What's on today"},
+    {"command": "tasks", "description": "Show my open tasks"},
+]
+
 
 def _public_base_url() -> str | None:
     """Best-effort public base URL, from an explicit var or the host's."""
@@ -35,8 +43,17 @@ def _public_base_url() -> str | None:
 @app.on_event("startup")
 async def register_webhook() -> None:
     """Auto-register the Telegram webhook on boot, if we can figure out the URL."""
+    if not os.environ.get("TELEGRAM_BOT_TOKEN"):
+        return
+
+    # Register the command menu (independent of the public URL).
+    try:
+        await telegram_client.set_my_commands(_BOT_COMMANDS)
+    except Exception as exc:  # noqa: BLE001 — don't crash boot over this
+        print(f"[startup] setMyCommands failed: {exc}")
+
     base = _public_base_url()
-    if not base or not os.environ.get("TELEGRAM_BOT_TOKEN"):
+    if not base:
         return
     webhook_url = base.rstrip("/") + "/webhook"
     try:

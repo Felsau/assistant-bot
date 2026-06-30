@@ -26,6 +26,12 @@ def handle_message(user_id: str, text: str) -> str:
             "Send me anything. I sort it into notes, schedule, tasks, or "
             "answer questions about what you've saved."
         )
+    if text.startswith("/today"):
+        rows = supabase_client.query(user_id, "today")
+        return classifier.format_query_reply("What's on today?", rows)
+    if text.startswith("/tasks"):
+        rows = supabase_client.query(user_id, "tasks")
+        return classifier.format_query_reply("Show my open tasks.", rows)
 
     result = classifier.classify(text)
     msg_type = result.get("type", "note")
