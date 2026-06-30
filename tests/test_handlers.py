@@ -11,7 +11,7 @@ def test_note_is_saved_with_delete_button(monkeypatch):
     monkeypatch.setattr(supabase_client, "insert_note", lambda uid, d: {"id": "n1"})
 
     replies = handlers.handle_message("u1", "remember buy milk")
-    assert "📝" in replies[0]["text"]
+    assert "Noted" in replies[0]["text"]
     button = replies[0]["reply_markup"]["inline_keyboard"][0][0]
     assert button["callback_data"] == "del:notes:n1"
 
@@ -51,7 +51,7 @@ def test_done_with_single_match_completes(monkeypatch):
     monkeypatch.setattr(supabase_client, "complete_task", fake_complete)
 
     replies = handlers.handle_message("u1", "/done call mom")
-    assert "✅ Done" in replies[0]["text"]
+    assert "Done: call mom" in replies[0]["text"]
     assert completed["id"] == "t1"
 
 
@@ -68,7 +68,7 @@ def test_callback_done(monkeypatch):
     monkeypatch.setattr(supabase_client, "complete_task",
                         lambda uid, tid: {"id": tid, "title": "x"})
     result = handlers.handle_callback("u1", "done:t1")
-    assert result["edit_text"] == "✅ x — done"
+    assert result["edit_text"] == "Done: x"
 
 
 def test_callback_delete(monkeypatch):

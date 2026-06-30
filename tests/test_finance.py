@@ -13,7 +13,7 @@ def test_expense_is_recorded(monkeypatch):
     monkeypatch.setattr(supabase_client, "insert_transaction", lambda uid, d: {"id": "x1"})
 
     replies = handlers.handle_message("u1", "coffee 60")
-    assert "💸 Expense" in replies[0]["text"]
+    assert "Expense" in replies[0]["text"]
     assert "60" in replies[0]["text"]
     assert replies[0]["reply_markup"]["inline_keyboard"][0][0]["callback_data"] == "del:transactions:x1"
 
@@ -26,7 +26,7 @@ def test_income_is_recorded(monkeypatch):
     monkeypatch.setattr(supabase_client, "insert_transaction", lambda uid, d: {"id": "x2"})
 
     replies = handlers.handle_message("u1", "salary 30000 in")
-    assert "💰 Income" in replies[0]["text"]
+    assert "Income" in replies[0]["text"]
 
 
 def test_expense_without_amount_falls_back_to_note(monkeypatch):
@@ -36,7 +36,7 @@ def test_expense_without_amount_falls_back_to_note(monkeypatch):
     monkeypatch.setattr(supabase_client, "insert_note", lambda uid, d: {"id": "n9"})
 
     replies = handlers.handle_message("u1", "spent some money")
-    assert "📝 Noted" in replies[0]["text"]
+    assert "Noted" in replies[0]["text"]
 
 
 def test_spent_summary(monkeypatch):
@@ -53,4 +53,4 @@ def test_spent_summary(monkeypatch):
     assert "Spent: 180" in text
     assert "Income: 1,000" in text
     assert "Net: 820" in text
-    assert "food: 100" in text
+    assert "food 100" in text

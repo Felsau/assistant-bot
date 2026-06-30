@@ -106,7 +106,7 @@ async def webhook(
     user_id = str(message["from"]["id"])
 
     if not _is_allowed(user_id):
-        await telegram_client.send_message(chat_id, "⛔ This is a private assistant bot.")
+        await telegram_client.send_message(chat_id, "This bot is private.")
         return {"ok": True}
 
     try:
@@ -125,13 +125,13 @@ async def webhook(
             text = None
         if not text:
             note = (
-                "🎤 I couldn't process that voice message. Please type it instead."
+                "Couldn't read that voice message. Type it instead."
                 if voice.enabled()
-                else "🎤 Voice isn't enabled. Set OPENAI_API_KEY to turn it on — for now, please type."
+                else "Voice isn't set up. Type it instead."
             )
             await telegram_client.send_message(chat_id, note)
             return {"ok": True}
-        await telegram_client.send_message(chat_id, f'🎤 "{text}"')
+        await telegram_client.send_message(chat_id, f'"{text}"')
 
     try:
         replies = handlers.handle_message(user_id, text)
@@ -189,9 +189,10 @@ async def daily_digest(
         try:
             rows = supabase_client.query(u["user_id"], "today")
             text = classifier.format_query_reply(
-                "Good morning! Give me a friendly summary of what's on for today.", rows
+                "Summarize what's on for today from this data. If nothing, say the day is clear.",
+                rows,
             )
-            await telegram_client.send_message(u["chat_id"], "☀️ " + text)
+            await telegram_client.send_message(u["chat_id"], text)
             sent += 1
         except Exception as exc:  # noqa: BLE001
             print(f"[digest] failed for {u.get('user_id')}: {exc}")
