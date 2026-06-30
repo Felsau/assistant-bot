@@ -17,6 +17,46 @@ from anthropic import Anthropic
 
 _MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-6")
 
+# Canonical bookkeeping categories. The classifier is told to pick from these,
+# and _normalize_category snaps anything else to the closest match (or "other").
+EXPENSE_CATEGORIES = [
+    "food", "groceries", "transport", "shopping", "bills", "housing",
+    "health", "entertainment", "education", "travel", "personal",
+    "gifts", "fees", "other",
+]
+INCOME_CATEGORIES = ["salary", "bonus", "refund", "interest", "gift", "other"]
+
+_CATEGORY_SYNONYMS = {
+    "dining": "food", "restaurant": "food", "coffee": "food", "drinks": "food",
+    "snacks": "food", "lunch": "food", "dinner": "food", "breakfast": "food",
+    "grocery": "groceries", "supermarket": "groceries",
+    "transportation": "transport", "fuel": "transport", "gas": "transport",
+    "taxi": "transport", "bus": "transport", "train": "transport", "car": "transport",
+    "clothes": "shopping", "clothing": "shopping",
+    "utilities": "bills", "utility": "bills", "phone": "bills", "internet": "bills",
+    "subscription": "bills", "subscriptions": "bills",
+    "rent": "housing", "mortgage": "housing", "home": "housing",
+    "medical": "health", "pharmacy": "health", "doctor": "health", "fitness": "health",
+    "movies": "entertainment", "movie": "entertainment", "games": "entertainment",
+    "tuition": "education", "books": "education", "course": "education",
+    "trip": "travel", "flight": "travel", "hotel": "travel",
+    "gift": "gifts", "donation": "gifts",
+    "fee": "fees", "tax": "fees", "taxes": "fees", "charges": "fees",
+    "wage": "salary", "wages": "salary", "payroll": "salary", "income": "salary",
+}
+
+
+def _normalize_category(kind: str, category) -> str | None:
+    """Snap a free-text category onto the canonical set for its kind."""
+    if not category:
+        return None
+    allowed = INCOME_CATEGORIES if kind == "income" else EXPENSE_CATEGORIES
+    c = str(category).strip().lower()
+    if c in allowed:
+        return c
+    c = _CATEGORY_SYNONYMS.get(c, c)
+    return c if c in allowed else "other"
+
 _client_instance: Anthropic | None = None
 
 
@@ -75,8 +115,11 @@ Rules:
 - Default task priority is "normal".
 - For "expense": a bare amount with a thing bought (e.g. "coffee 60", "lunch 120
   baht") is kind "expense"; words like salary/refund/received/income mean kind
-  "income". Extract a numeric "amount". Infer a short "category" when obvious.
-  Default occurred_on to today if no date is given.
+  "income". Extract a numeric "amount". Default occurred_on to today if no date
+  is given.
+- For an expense "category", choose the single best fit from this list:
+  {expense_categories}. Use "other" if nothing fits. For income, use one of:
+  {income_categories}.
 - Questions about spending/budget/how much was spent are "query" with scope
   "expenses".
 - Match the user's language in any text you echo back.
@@ -85,7 +128,11 @@ Rules:
 
 def classify(message: str) -> dict:
     """Classify ``message`` and return ``{"type": ..., "data": {...}}``."""
-    system = _SYSTEM_PROMPT.format(today=date.today().isoformat())
+    system = _SYSTEM_PROMPT.format(
+        today=date.today().isoformat(),
+        expense_categories=", ".join(EXPENSE_CATEGORIES),
+        income_categories=", ".join(INCOME_CATEGORIES),
+    )
 
     response = _client().messages.create(
         model=_MODEL,
@@ -100,7 +147,12 @@ def classify(message: str) -> dict:
         block.text for block in response.content if block.type == "text"
     ).strip()
 
-    return _parse_json(text)
+    result = _parse_json(text)
+    if result.get("type") == "expense":
+        data = result.get("data") or {}
+        data["category"] = _normalize_category(data.get("kind", "expense"), data.get("category"))
+        result["data"] = data
+    return result
 
 
 def _parse_json(text: str) -> dict:

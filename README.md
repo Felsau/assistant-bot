@@ -204,3 +204,13 @@ Examples:
 
 `note` / `schedule` / `task` / `expense` get inserted into Supabase. `query`
 reads the relevant rows back and asks Claude to format a friendly reply.
+
+Expenses are filed into a fixed set of categories, so `/spent` totals stay
+consistent (anything unrecognized snaps to `other`):
+
+- **Expense:** food, groceries, transport, shopping, bills, housing, health,
+  entertainment, education, travel, personal, gifts, fees, other
+- **Income:** salary, bonus, refund, interest, gift, other
+
+The category set lives in `ai/classifier.py` (`EXPENSE_CATEGORIES` /
+`INCOME_CATEGORIES`) — edit it there to add your own.
