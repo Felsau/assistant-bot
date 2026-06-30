@@ -128,9 +128,11 @@ def format_query_reply(question: str, rows: dict) -> str:
         model=_MODEL,
         max_tokens=1024,
         system=(
-            "You are a friendly personal assistant. Given the user's question "
-            "and their stored data (as JSON), answer concisely and clearly. "
-            "Reply in the user's language. If there's nothing relevant, say so."
+            "Answer the user's question from their saved data (JSON of notes, "
+            "schedule, tasks, expenses). Answer directly, first sentence first. "
+            "No preamble, no sign-off, no filler like 'Here's' or 'Sure'. No "
+            "emoji. Keep it short. Reply in the user's language. If nothing is "
+            "relevant, say so plainly."
         ),
         messages=[
             {

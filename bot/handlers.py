@@ -17,26 +17,25 @@ from ai import classifier
 from db import supabase_client
 
 START_TEXT = (
-    "Hi! I'm your personal assistant. 🤖\n\n"
-    "Just talk to me naturally:\n"
-    "• \"Remember my locker code is 4821\" → I save a note\n"
-    "• \"Math class Monday 9-11 in room 301\" → I save your schedule\n"
-    "• \"Submit the report by Friday\" → I save a task\n"
-    "• \"Coffee 60\" / \"Salary 30000 in\" → I log money in/out\n"
-    "• \"What's on today?\" → I look it up and tell you\n\n"
-    "Commands: /today  /tasks  /done  /spent  /help\n"
-    "You can also send a voice message."
+    "I sort what you send into notes, schedule, tasks, and expenses, and "
+    "answer questions about them. Just write normally:\n\n"
+    "wifi password is hunter2\n"
+    "Math Monday 9-11 room 301\n"
+    "submit the report Friday\n"
+    "coffee 60   /   salary 30000 in\n"
+    "what's on today?\n\n"
+    "Commands: /today /tasks /done /spent /help. Voice works too."
 )
 
 HELP_TEXT = (
-    "Send me anything — I sort it into notes, schedule, tasks, or answer "
-    "questions about what you've saved.\n\n"
-    "• /today — what's on today\n"
-    "• /tasks — your open tasks (tap ✅ to finish, 🗑 to delete)\n"
-    "• /done <task> — mark a task complete\n"
-    "• /spent — this month's income, spending, and top categories\n"
-    "Tip: log money by typing things like \"taxi 80\" or \"bonus 5000 in\", "
-    "and send a voice message and I'll transcribe it."
+    "Write a note, schedule item, task, or amount and I file it. Ask a "
+    "question and I look it up.\n\n"
+    "/today   what's on today\n"
+    "/tasks   open tasks, with buttons to finish or delete\n"
+    "/done <task>   mark a task done\n"
+    "/spent   this month's totals by category\n\n"
+    "Log money by writing things like \"taxi 80\" or \"bonus 5000 in\". "
+    "Voice messages get transcribed."
 )
 
 
@@ -49,8 +48,8 @@ def _task_markup(task_id: str | None) -> dict | None:
         return None
     return {
         "inline_keyboard": [[
-            {"text": "✅ Done", "callback_data": f"done:{task_id}"},
-            {"text": "🗑 Delete", "callback_data": f"del:tasks:{task_id}"},
+            {"text": "Done", "callback_data": f"done:{task_id}"},
+            {"text": "Delete", "callback_data": f"del:tasks:{task_id}"},
         ]]
     }
 
@@ -60,7 +59,7 @@ def _delete_markup(table: str, row_id: str | None) -> dict | None:
         return None
     return {
         "inline_keyboard": [[
-            {"text": "🗑 Delete", "callback_data": f"del:{table}:{row_id}"},
+            {"text": "Delete", "callback_data": f"del:{table}:{row_id}"},
         ]]
     }
 
@@ -69,7 +68,7 @@ def handle_message(user_id: str, text: str) -> list[dict]:
     """Process one user message and return a list of replies."""
     text = (text or "").strip()
     if not text:
-        return [_reply("Send me a note, a schedule entry, a task, or a question. 🙂")]
+        return [_reply("Send a note, schedule item, task, expense, or a question.")]
 
     if text.startswith("/start"):
         return [_reply(START_TEXT)]
@@ -92,29 +91,29 @@ def handle_message(user_id: str, text: str) -> list[dict]:
     if msg_type == "note":
         row = supabase_client.insert_note(user_id, data)
         return [_reply(
-            f"📝 Noted: {data.get('content', text)}",
+            f"Noted: {data.get('content', text)}",
             _delete_markup("notes", row.get("id")),
         )]
 
     if msg_type == "schedule":
         row = supabase_client.insert_schedule(user_id, data)
         return [_reply(
-            "📅 Added to your schedule: " + _describe_schedule(data),
+            "Added: " + _describe_schedule(data),
             _delete_markup("schedule", row.get("id")),
         )]
 
     if msg_type == "task":
         row = supabase_client.insert_task(user_id, data)
         return [_reply(
-            "✅ Task added: " + _describe_task(data),
+            "Task added: " + _describe_task(data),
             _task_markup(row.get("id")),
         )]
 
     if msg_type == "expense":
         if data.get("amount") in (None, ""):
-            # No amount detected — don't lose it; keep it as a note.
+            # No amount detected — keep it as a note rather than lose it.
             row = supabase_client.insert_note(user_id, {"content": text})
-            return [_reply(f"📝 Noted: {text}", _delete_markup("notes", row.get("id")))]
+            return [_reply(f"Noted: {text}", _delete_markup("notes", row.get("id")))]
         row = supabase_client.insert_transaction(user_id, data)
         return [_reply(
             _describe_transaction(data),
@@ -127,7 +126,7 @@ def handle_message(user_id: str, text: str) -> list[dict]:
 
     # Unknown type — fall back to saving a note so nothing is lost.
     row = supabase_client.insert_note(user_id, {"content": text})
-    return [_reply(f"📝 Noted: {text}", _delete_markup("notes", row.get("id")))]
+    return [_reply(f"Noted: {text}", _delete_markup("notes", row.get("id")))]
 
 
 def handle_callback(user_id: str, data: str) -> dict:
@@ -138,14 +137,14 @@ def handle_callback(user_id: str, data: str) -> dict:
     if action == "done" and len(parts) == 2:
         row = supabase_client.complete_task(user_id, parts[1])
         if row:
-            return {"answer": "Marked done ✅", "edit_text": f"✅ {row['title']} — done"}
+            return {"answer": "Done", "edit_text": f"Done: {row['title']}"}
         return {"answer": "Task not found", "edit_text": None}
 
     if action == "del" and len(parts) == 3:
         ok = supabase_client.delete_row(user_id, parts[1], parts[2])
         return {
-            "answer": "Deleted 🗑" if ok else "Already gone",
-            "edit_text": "🗑 Deleted" if ok else None,
+            "answer": "Deleted" if ok else "Already gone",
+            "edit_text": "Deleted" if ok else None,
         }
 
     return {"answer": "Unknown action", "edit_text": None}
@@ -154,10 +153,10 @@ def handle_callback(user_id: str, data: str) -> dict:
 def _list_open_tasks(user_id: str) -> list[dict]:
     tasks = supabase_client.open_tasks(user_id)
     if not tasks:
-        return [_reply("🎉 No open tasks. You're all caught up!")]
-    replies = [_reply("🗒 Your open tasks:")]
+        return [_reply("No open tasks.")]
+    replies = [_reply("Open tasks:")]
     for t in tasks:
-        replies.append(_reply("• " + _describe_task(t), _task_markup(t["id"])))
+        replies.append(_reply(_describe_task(t), _task_markup(t["id"])))
     return replies
 
 
@@ -165,23 +164,23 @@ def _handle_done(user_id: str, arg: str) -> list[dict]:
     if not arg:
         tasks = supabase_client.open_tasks(user_id)
         if not tasks:
-            return [_reply("🎉 No open tasks to complete.")]
-        replies = [_reply("Which task did you finish? Tap ✅")]
+            return [_reply("No open tasks.")]
+        replies = [_reply("Which one did you finish?")]
         for t in tasks:
-            replies.append(_reply("• " + _describe_task(t), _task_markup(t["id"])))
+            replies.append(_reply(_describe_task(t), _task_markup(t["id"])))
         return replies
 
     matches = supabase_client.open_tasks(user_id, like=arg)
     if not matches:
-        return [_reply(f"Couldn't find an open task matching “{arg}”.")]
+        return [_reply(f'No open task matches "{arg}".')]
     if len(matches) == 1:
         t = matches[0]
         supabase_client.complete_task(user_id, t["id"])
-        return [_reply(f"✅ Done: {t['title']}")]
+        return [_reply(f"Done: {t['title']}")]
 
-    replies = [_reply("Multiple matches — tap the one you finished:")]
+    replies = [_reply("More than one match. Tap the one you finished:")]
     for t in matches:
-        replies.append(_reply("• " + _describe_task(t), _task_markup(t["id"])))
+        replies.append(_reply(_describe_task(t), _task_markup(t["id"])))
     return replies
 
 
@@ -189,7 +188,7 @@ def _month_summary(user_id: str) -> list[dict]:
     start = date.today().replace(day=1)
     rows = supabase_client.list_transactions(user_id, start.isoformat())
     if not rows:
-        return [_reply("No money logged this month yet. Try \"coffee 60\". 💸")]
+        return [_reply("Nothing logged this month yet.")]
 
     income = sum(_num(r.get("amount")) for r in rows if r.get("kind") == "income")
     expense = sum(_num(r.get("amount")) for r in rows if r.get("kind", "expense") != "income")
@@ -201,29 +200,29 @@ def _month_summary(user_id: str) -> list[dict]:
             by_category[cat] = by_category.get(cat, 0) + _num(r.get("amount"))
 
     lines = [
-        f"📊 {start.strftime('%B %Y')}",
-        f"💸 Spent: {_fmt(expense)}",
-        f"💰 Income: {_fmt(income)}",
-        f"💼 Net: {_fmt(income - expense)}",
+        start.strftime("%B %Y"),
+        f"Spent: {_fmt(expense)}",
+        f"Income: {_fmt(income)}",
+        f"Net: {_fmt(income - expense)}",
     ]
     if by_category:
-        lines.append("\nTop categories:")
+        lines.append("")
+        lines.append("By category:")
         for cat, amt in sorted(by_category.items(), key=lambda kv: -kv[1])[:5]:
-            lines.append(f"  • {cat}: {_fmt(amt)}")
+            lines.append(f"  {cat} {_fmt(amt)}")
     return [_reply("\n".join(lines))]
 
 
 def _describe_transaction(data: dict) -> str:
-    kind = data.get("kind", "expense")
-    label = "💰 Income" if kind == "income" else "💸 Expense"
+    label = "Income" if data.get("kind") == "income" else "Expense"
     amount = _fmt(_num(data.get("amount")))
     currency = data.get("currency")
     head = f"{label}: {amount}{(' ' + currency) if currency else ''}"
     extras = [x for x in (data.get("category"), data.get("note")) if x]
     if extras:
-        head += " — " + " · ".join(extras)
+        head += " (" + ", ".join(extras) + ")"
     if data.get("occurred_on"):
-        head += f" ({data['occurred_on']})"
+        head += f" on {data['occurred_on']}"
     return head
 
 
@@ -245,18 +244,18 @@ def _describe_schedule(data: dict) -> str:
     if data.get("start_time"):
         span = data["start_time"]
         if data.get("end_time"):
-            span += f"–{data['end_time']}"
+            span += f"-{data['end_time']}"
         parts.append(span)
     if data.get("location"):
-        parts.append(f"@ {data['location']}")
-    return " · ".join(parts)
+        parts.append(f"in {data['location']}")
+    return ", ".join(parts)
 
 
 def _describe_task(data: dict) -> str:
     out = data.get("title", "(untitled)")
     if data.get("due_date"):
-        out += f" (due {data['due_date']})"
+        out += f", due {data['due_date']}"
     priority = data.get("priority", "normal")
     if priority and priority != "normal":
-        out += f" [{priority}]"
+        out += f", {priority} priority"
     return out

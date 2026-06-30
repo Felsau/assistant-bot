@@ -1,4 +1,4 @@
-# Personal Assistant Bot 🤖
+# Personal Assistant Bot
 
 A personal assistant bot for **Telegram** that understands natural-language
 messages, classifies them with the **Claude API**, and stores/retrieves the
@@ -17,7 +17,7 @@ Send it a message and it figures out what you meant:
 | `What's on today?` / `How much did I spend?` | **queries** your data and answers |
 
 It also handles **voice messages**, gives every item **inline buttons**
-(✅ done / 🗑 delete), and can send a **morning digest** of your day.
+(done / delete), and can send a **morning digest** of your day.
 
 ### Commands
 
