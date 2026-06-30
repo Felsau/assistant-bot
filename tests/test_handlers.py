@@ -26,7 +26,7 @@ def test_task_is_saved_with_done_and_delete_buttons(monkeypatch):
     assert "Task added" in replies[0]["text"]
     row = replies[0]["reply_markup"]["inline_keyboard"][0]
     assert row[0]["callback_data"] == "done:t1"
-    assert row[1]["callback_data"] == "del:tasks:t1"
+    assert row[-1]["callback_data"] == "del:tasks:t1"
 
 
 def test_query_is_formatted(monkeypatch):

@@ -16,7 +16,7 @@ load_dotenv()
 
 # Imported after load_dotenv so module-level clients see the env vars.
 from ai import classifier  # noqa: E402
-from bot import handlers, telegram_client, voice  # noqa: E402
+from bot import clock, handlers, report, telegram_client, voice  # noqa: E402
 from db import supabase_client  # noqa: E402
 
 app = FastAPI(title="Personal Assistant Bot")
@@ -38,6 +38,9 @@ _BOT_COMMANDS = [
     {"command": "done", "description": "Mark a task complete"},
     {"command": "spent", "description": "This month's spending summary"},
     {"command": "budget", "description": "Set or view monthly budgets"},
+    {"command": "report", "description": "Spending report with a chart"},
+    {"command": "find", "description": "Search your notes, tasks, expenses"},
+    {"command": "recurring", "description": "Manage recurring expenses"},
     {"command": "export", "description": "Download your transactions as CSV"},
 ]
 
@@ -118,9 +121,14 @@ async def webhook(
 
     text = message.get("text")
 
-    # Photos → read as a receipt and log the expense.
+    # Photos → read as a receipt and log the expense(s).
     if not text and message.get("photo"):
         await _handle_receipt(chat_id, user_id, message["photo"][-1]["file_id"])
+        return {"ok": True}
+
+    # /report sends a chart image, so it's handled here, not via handle_message.
+    if text and text.startswith("/report"):
+        await _handle_report(chat_id, user_id)
         return {"ok": True}
 
     # Voice notes → transcribe, then treat the transcript as text.
@@ -171,9 +179,23 @@ async def _handle_receipt(chat_id: int, user_id: str, file_id: str) -> None:
         )
         return
 
-    replies = handlers.record_expense(user_id, data)
+    replies = handlers.record_receipt(user_id, data)
     for r in replies:
         await telegram_client.send_message(chat_id, r["text"], r.get("reply_markup"))
+
+
+async def _handle_report(chat_id: int, user_id: str) -> None:
+    """Send a spending report plus a category bar chart."""
+    text, by_category = handlers.report_text(user_id)
+    try:
+        image = report.render_category_chart(by_category, text.splitlines()[0])
+    except Exception as exc:  # noqa: BLE001 — chart is a nice-to-have
+        print(f"[report] chart failed: {exc}")
+        image = None
+    if image:
+        await telegram_client.send_photo(chat_id, image, caption=text)
+    else:
+        await telegram_client.send_message(chat_id, text)
 
 
 async def _handle_export(chat_id: int, user_id: str) -> None:
@@ -237,9 +259,69 @@ async def daily_digest(
                 "Summarize what's on for today from this data. If nothing, say the day is clear.",
                 rows,
             )
+            warn = handlers.budget_warnings(u["user_id"])
+            if warn:
+                text += "\n\n" + warn
             await telegram_client.send_message(u["chat_id"], text)
             sent += 1
         except Exception as exc:  # noqa: BLE001
             print(f"[digest] failed for {u.get('user_id')}: {exc}")
 
     return {"ok": True, "sent": sent}
+
+
+@app.post("/cron/reminders")
+async def fire_reminders(
+    secret: str | None = None,
+    x_cron_secret: str | None = Header(default=None),
+) -> dict:
+    """Deliver any reminders that are now due. Call every minute or few."""
+    if not _CRON_SECRET or (x_cron_secret or secret) != _CRON_SECRET:
+        raise HTTPException(status_code=403, detail="forbidden")
+
+    chat_of = {u["user_id"]: u["chat_id"] for u in supabase_client.list_users()}
+    due = supabase_client.due_reminders(clock.now().isoformat())
+    sent = 0
+    for r in due:
+        chat_id = chat_of.get(r["user_id"])
+        try:
+            if chat_id:
+                await telegram_client.send_message(chat_id, "Reminder: " + r.get("text", ""))
+                sent += 1
+            supabase_client.mark_reminder_sent(r["id"])
+        except Exception as exc:  # noqa: BLE001
+            print(f"[reminders] failed for {r.get('id')}: {exc}")
+    return {"ok": True, "sent": sent}
+
+
+@app.post("/cron/recurring")
+async def post_recurring(
+    secret: str | None = None,
+    x_cron_secret: str | None = Header(default=None),
+) -> dict:
+    """Post due recurring expenses for today. Call once a day."""
+    if not _CRON_SECRET or (x_cron_secret or secret) != _CRON_SECRET:
+        raise HTTPException(status_code=403, detail="forbidden")
+
+    today = clock.today()
+    posted = 0
+    for r in supabase_client.all_recurring():
+        if int(r.get("day_of_month", 1)) != today.day:
+            continue
+        last = str(r.get("last_posted") or "")[:7]
+        if last == today.strftime("%Y-%m"):
+            continue  # already posted this month
+        try:
+            supabase_client.insert_transaction(r["user_id"], {
+                "kind": r.get("kind", "expense"),
+                "amount": r.get("amount"),
+                "currency": r.get("currency"),
+                "category": r.get("category"),
+                "note": r.get("note"),
+                "occurred_on": today.isoformat(),
+            })
+            supabase_client.mark_recurring_posted(r["id"], today.isoformat())
+            posted += 1
+        except Exception as exc:  # noqa: BLE001
+            print(f"[recurring] failed for {r.get('id')}: {exc}")
+    return {"ok": True, "posted": posted}

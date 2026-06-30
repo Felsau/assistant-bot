@@ -43,6 +43,31 @@ create table if not exists transactions (
   created_at timestamptz default now()
 );
 
+-- One-off timed reminders, fired by the /cron/reminders endpoint.
+create table if not exists reminders (
+  id uuid primary key default gen_random_uuid(),
+  user_id text not null,
+  text text not null,
+  remind_at timestamptz not null,
+  sent boolean default false,
+  created_at timestamptz default now()
+);
+create index if not exists reminders_due_idx on reminders (sent, remind_at);
+
+-- Recurring expenses (subscriptions, rent), posted by /cron/recurring.
+create table if not exists recurring (
+  id uuid primary key default gen_random_uuid(),
+  user_id text not null,
+  kind text not null default 'expense',
+  amount numeric not null,
+  currency text,
+  category text,
+  note text,
+  day_of_month int not null default 1,
+  last_posted date,
+  created_at timestamptz default now()
+);
+
 -- Monthly budgets per category ('total' = overall monthly limit).
 create table if not exists budgets (
   user_id text not null,

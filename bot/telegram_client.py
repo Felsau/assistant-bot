@@ -70,6 +70,21 @@ async def send_document(
         resp.raise_for_status()
 
 
+async def send_photo(
+    chat_id: int | str, image: bytes, caption: str | None = None
+) -> None:
+    """Send a photo (used for the spending chart)."""
+    url = f"{_API_BASE}/bot{_token()}/sendPhoto"
+    data: dict = {"chat_id": str(chat_id)}
+    if caption:
+        data["caption"] = caption
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.post(
+            url, data=data, files={"photo": ("chart.png", image, "image/png")}
+        )
+        resp.raise_for_status()
+
+
 async def download_file(file_id: str) -> bytes:
     """Resolve a Telegram file_id and download its bytes (used for voice)."""
     async with httpx.AsyncClient(timeout=30) as client:
