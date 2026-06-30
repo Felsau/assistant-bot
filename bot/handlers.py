@@ -13,9 +13,10 @@ from __future__ import annotations
 
 import csv
 import io
-from datetime import date
+from datetime import datetime, timedelta
 
 from ai import classifier
+from bot import clock
 from db import supabase_client
 
 START_TEXT = (
@@ -25,8 +26,10 @@ START_TEXT = (
     "Math Monday 9-11 room 301\n"
     "submit the report Friday\n"
     "coffee 60   /   salary 30000 in\n"
+    "remind me to call the bank at 3pm\n"
     "what's on today?\n\n"
-    "Commands: /today /tasks /done /spent /help. Voice works too."
+    "Commands: /today /tasks /done /spent /budget /report /find /recurring "
+    "/export /help. Voice and receipt photos work too."
 )
 
 HELP_TEXT = (
@@ -37,10 +40,12 @@ HELP_TEXT = (
     "/done <task>   mark a task done\n"
     "/spent   this month's totals by category\n"
     "/budget   set or view monthly budgets (e.g. /budget food 3000)\n"
+    "/report   spending vs last month, with a chart\n"
+    "/find <text>   search notes, tasks, expenses\n"
+    "/recurring   manage monthly recurring expenses\n"
     "/export   download your transactions as CSV\n\n"
-    "Log money by writing things like \"taxi 80\" or \"bonus 5000 in\", or "
-    "send a photo of a receipt and I'll read the total. Voice messages get "
-    "transcribed."
+    "Set reminders by writing \"remind me to X at 3pm\". Log money with "
+    "\"taxi 80\" or by sending a receipt photo. Voice messages get transcribed."
 )
 
 
@@ -54,6 +59,7 @@ def _task_markup(task_id: str | None) -> dict | None:
     return {
         "inline_keyboard": [[
             {"text": "Done", "callback_data": f"done:{task_id}"},
+            {"text": "+1 day", "callback_data": f"snooze:{task_id}"},
             {"text": "Delete", "callback_data": f"del:tasks:{task_id}"},
         ]]
     }
@@ -90,6 +96,10 @@ def handle_message(user_id: str, text: str) -> list[dict]:
         return _month_summary(user_id)
     if text.startswith("/budget"):
         return _handle_budget(user_id, text[len("/budget"):].strip())
+    if text.startswith("/find"):
+        return _handle_find(user_id, text[len("/find"):].strip())
+    if text.startswith("/recurring"):
+        return _handle_recurring(user_id, text[len("/recurring"):].strip())
 
     result = classifier.classify(text)
     msg_type = result.get("type", "note")
@@ -115,6 +125,13 @@ def handle_message(user_id: str, text: str) -> list[dict]:
             "Task added: " + _describe_task(data),
             _task_markup(row.get("id")),
         )]
+
+    if msg_type == "reminder":
+        if not data.get("remind_at"):
+            row = supabase_client.insert_note(user_id, {"content": text})
+            return [_reply(f"Noted: {text}", _delete_markup("notes", row.get("id")))]
+        supabase_client.insert_reminder(user_id, data)
+        return [_reply(f"Reminder set for {data['remind_at']}: {data.get('text', '').strip()}")]
 
     if msg_type == "expense":
         if data.get("amount") in (None, ""):
@@ -153,6 +170,20 @@ def handle_callback(user_id: str, data: str) -> dict:
         if row:
             return {"answer": "Done", "edit_text": f"Done: {row['title']}"}
         return {"answer": "Task not found", "edit_text": None}
+
+    if action == "snooze" and len(parts) == 2:
+        task = supabase_client.get_task(user_id, parts[1])
+        if not task:
+            return {"answer": "Task not found", "edit_text": None}
+        base = _parse_date(task.get("due_date")) or clock.today()
+        new_due = (base + timedelta(days=1)).isoformat()
+        supabase_client.set_task_due(user_id, parts[1], new_due)
+        task["due_date"] = new_due
+        return {
+            "answer": "Moved to " + new_due,
+            "edit_text": _describe_task(task),
+            "reply_markup": _task_markup(parts[1]),  # keep the buttons
+        }
 
     if action == "del" and len(parts) == 3:
         ok = supabase_client.delete_row(user_id, parts[1], parts[2])
@@ -200,7 +231,7 @@ def _handle_done(user_id: str, arg: str) -> list[dict]:
 
 def _month_expenses(user_id: str):
     """Return (income, expense_total, {category: spent}) for the current month."""
-    start = date.today().replace(day=1)
+    start = clock.today().replace(day=1)
     rows = supabase_client.list_transactions(user_id, start.isoformat())
     income = sum(_num(r.get("amount")) for r in rows if r.get("kind") == "income")
     total = sum(_num(r.get("amount")) for r in rows if r.get("kind", "expense") != "income")
@@ -218,7 +249,7 @@ def _month_summary(user_id: str) -> list[dict]:
         return [_reply("Nothing logged this month yet.")]
 
     lines = [
-        date.today().strftime("%B %Y"),
+        clock.today().strftime("%B %Y"),
         f"Spent: {_fmt(expense)}",
         f"Income: {_fmt(income)}",
         f"Net: {_fmt(income - expense)}",
@@ -273,7 +304,7 @@ def _budget_status(user_id: str) -> list[dict]:
             "an overall monthly limit."
         )]
     _, total, by_category = _month_expenses(user_id)
-    lines = [f"Budgets, {date.today():%B %Y}"]
+    lines = [f"Budgets, {clock.today():%B %Y}"]
     if "total" in budgets:
         lines.append(_budget_line("total", total, budgets["total"]))
     for cat in sorted(c for c in budgets if c != "total"):
@@ -303,6 +334,168 @@ def _budget_line(name: str, spent: float, limit: float) -> str:
         return f"{name}: {_fmt(spent)} / {_fmt(limit)} — over by {_fmt(spent - limit)}"
     pct = (spent / limit * 100) if limit else 0
     return f"{name}: {_fmt(spent)} / {_fmt(limit)} ({pct:.0f}%)"
+
+
+def _handle_find(user_id: str, q: str) -> list[dict]:
+    if not q:
+        return [_reply("Usage: /find <text> — searches your notes, tasks, and expenses.")]
+    replies: list[dict] = []
+    for note in supabase_client.search(user_id, "notes", "content", q):
+        replies.append(_reply("Note: " + note.get("content", ""),
+                              _delete_markup("notes", note["id"])))
+    for task in supabase_client.search(user_id, "tasks", "title", q):
+        replies.append(_reply("Task: " + _describe_task(task), _task_markup(task["id"])))
+    for tx in supabase_client.search(user_id, "transactions", "note", q):
+        replies.append(_reply(_describe_transaction(tx),
+                              _delete_markup("transactions", tx["id"])))
+    if not replies:
+        return [_reply(f'Nothing matches "{q}".')]
+    return replies[:15]
+
+
+def _handle_recurring(user_id: str, arg: str) -> list[dict]:
+    parts = arg.split()
+    if not parts or parts[0] == "list":
+        items = supabase_client.list_recurring(user_id)
+        if not items:
+            return [_reply(
+                "No recurring entries. Add one with: "
+                "/recurring add 8000 housing rent 1  (amount category note day)"
+            )]
+        lines = ["Recurring (monthly):"]
+        for r in items:
+            lines.append(
+                f"  [{r['id'][:8]}] {_fmt(_num(r.get('amount')))} "
+                f"{r.get('category') or 'other'}"
+                f"{(' ' + r['note']) if r.get('note') else ''} on day {r.get('day_of_month', 1)}"
+            )
+        lines.append("\nRemove with: /recurring remove <id>")
+        return [_reply("\n".join(lines))]
+
+    if parts[0] == "remove" and len(parts) >= 2:
+        ok = _remove_recurring_by_prefix(user_id, parts[1])
+        return [_reply("Removed." if ok else "No recurring entry with that id.")]
+
+    if parts[0] == "add":
+        rest = parts[1:]
+        if not rest:
+            return [_reply("Usage: /recurring add <amount> [category] [note] [day]")]
+        try:
+            amount = float(rest[0].replace(",", ""))
+        except ValueError:
+            return [_reply("Usage: /recurring add <amount> [category] [note] [day]")]
+        day = 1
+        if len(rest) >= 2 and rest[-1].isdigit():
+            day = max(1, min(28, int(rest[-1])))
+            rest = rest[:-1]
+        category = classifier._normalize_category("expense", rest[1]) if len(rest) >= 2 else None
+        note = " ".join(rest[2:]) if len(rest) >= 3 else None
+        supabase_client.insert_recurring(user_id, {
+            "kind": "expense", "amount": amount, "category": category,
+            "note": note, "day_of_month": day,
+        })
+        return [_reply(
+            f"Recurring set: {_fmt(amount)} {category or 'other'} on day {day} each month."
+        )]
+
+    return [_reply("Usage: /recurring add <amount> [category] [note] [day], or /recurring remove <id>")]
+
+
+def _remove_recurring_by_prefix(user_id: str, prefix: str) -> bool:
+    for r in supabase_client.list_recurring(user_id):
+        if r["id"].startswith(prefix) or r["id"][:8] == prefix:
+            return supabase_client.delete_recurring(user_id, r["id"])
+    return False
+
+
+def report_text(user_id: str):
+    """Build a this-month-vs-last-month report. Returns (text, by_category)."""
+    today = clock.today()
+    cur_start = today.replace(day=1)
+    prev_end = cur_start - timedelta(days=1)
+    prev_start = prev_end.replace(day=1)
+
+    cur = supabase_client.list_transactions(user_id, cur_start.isoformat())
+    prev = supabase_client.list_transactions(
+        user_id, prev_start.isoformat(), prev_end.isoformat()
+    )
+
+    cur_exp = sum(_num(r.get("amount")) for r in cur if r.get("kind", "expense") != "income")
+    prev_exp = sum(_num(r.get("amount")) for r in prev if r.get("kind", "expense") != "income")
+
+    by_category: dict[str, float] = {}
+    for r in cur:
+        if r.get("kind", "expense") != "income":
+            cat = r.get("category") or "other"
+            by_category[cat] = by_category.get(cat, 0) + _num(r.get("amount"))
+
+    delta = cur_exp - prev_exp
+    if prev_exp:
+        trend = f"{'+' if delta >= 0 else ''}{delta / prev_exp * 100:.0f}% vs last month"
+    else:
+        trend = "no spending last month to compare"
+
+    lines = [
+        f"Report, {today:%B %Y}",
+        f"Spent: {_fmt(cur_exp)} ({trend})",
+        f"Last month: {_fmt(prev_exp)}",
+    ]
+    if by_category:
+        lines.append("")
+        lines.append("By category:")
+        for cat, amt in sorted(by_category.items(), key=lambda kv: -kv[1]):
+            lines.append(f"  {cat} {_fmt(amt)}")
+    return "\n".join(lines), by_category
+
+
+def budget_warnings(user_id: str) -> str | None:
+    """Categories at/over 80% of budget this month — for the morning digest."""
+    budgets = supabase_client.get_budgets(user_id)
+    if not budgets:
+        return None
+    _, total, by_category = _month_expenses(user_id)
+    lines = []
+    for name, limit in budgets.items():
+        spent = total if name == "total" else by_category.get(name, 0)
+        if limit and spent >= 0.8 * limit:
+            lines.append(_budget_line(name, spent, limit))
+    if not lines:
+        return None
+    return "Budget watch:\n" + "\n".join(lines)
+
+
+def record_receipt(user_id: str, data: dict) -> list[dict]:
+    """Log a receipt: split into items when given, else a single total."""
+    total = _num(data.get("amount"))
+    items = [it for it in (data.get("items") or []) if isinstance(it, dict) and it.get("amount")]
+    item_sum = sum(_num(it.get("amount")) for it in items)
+
+    # Only split when 2+ items roughly add up to the total (avoid double counting).
+    if len(items) >= 2 and total and abs(item_sum - total) <= max(1.0, total * 0.05):
+        merchant = data.get("note")
+        replies = []
+        for it in items:
+            entry = {
+                "kind": "expense",
+                "amount": _num(it.get("amount")),
+                "currency": data.get("currency"),
+                "category": it.get("category") or "other",
+                "note": it.get("note") or merchant,
+                "occurred_on": data.get("occurred_on"),
+            }
+            replies.extend(record_expense(user_id, entry))
+        return replies
+
+    return record_expense(user_id, data)
+
+
+def _parse_date(value):
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value)[:10]).date()
+    except ValueError:
+        return None
 
 
 def build_transactions_csv(rows: list[dict]) -> bytes:

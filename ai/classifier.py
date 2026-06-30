@@ -12,9 +12,10 @@ from __future__ import annotations
 import base64
 import json
 import os
-from datetime import date
 
 from anthropic import Anthropic
+
+from bot import clock
 
 _MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-6")
 
@@ -106,12 +107,19 @@ Types and their data fields:
                      "note": string|null,
                      "occurred_on": "YYYY-MM-DD"|null}}
 
+- "reminder" the user wants to be pinged at a specific time.
+             data: {{"text": string,                    // what to remind about
+                     "remind_at": "YYYY-MM-DD HH:MM"}}   // 24h, absolute
+
 - "query"    the user is asking about their stored data.
              data: {{"scope": "today"|"week"|"tasks"|"schedule"|"notes"|"expenses"|"all"}}
 
 Rules:
-- Today's date is {today}. Resolve relative dates ("tomorrow", "Friday") to an
-  absolute YYYY-MM-DD.
+- Today's date is {today}; the current time is {now}. Resolve relative dates and
+  times ("tomorrow", "Friday", "in 30 minutes", "at 3pm") to absolute values.
+- A "reminder" has an explicit time to ping the user ("remind me to X at/in ...").
+  A "task" is a to-do, possibly with a due date but no ping time. If the message
+  asks to be reminded at a time, it is a "reminder".
 - Times are 24-hour "HH:MM". Use null for anything not stated.
 - Default task priority is "normal".
 - For "expense": a bare amount with a thing bought (e.g. "coffee 60", "lunch 120
@@ -130,7 +138,8 @@ Rules:
 def classify(message: str) -> dict:
     """Classify ``message`` and return ``{"type": ..., "data": {...}}``."""
     system = _SYSTEM_PROMPT.format(
-        today=date.today().isoformat(),
+        today=clock.today().isoformat(),
+        now=clock.now().strftime("%Y-%m-%d %H:%M"),
         expense_categories=", ".join(EXPENSE_CATEGORIES),
         income_categories=", ".join(INCOME_CATEGORIES),
     )
@@ -179,21 +188,29 @@ _RECEIPT_SYSTEM = """\
 You read a photo of a receipt or bill and return ONLY a JSON object, no prose:
 
   {{"kind": "expense", "amount": number, "currency": string|null,
-    "category": string|null, "note": string|null, "occurred_on": "YYYY-MM-DD"|null}}
+    "category": string|null, "note": string|null, "occurred_on": "YYYY-MM-DD"|null,
+    "items": [{{"amount": number, "category": string, "note": string}}]}}
 
 - "amount" is the grand total actually paid (after tax and discounts). Number only.
 - "note" is the merchant / store name if visible.
 - "category" is the single best fit from: {expense_categories}. Use "other" if unsure.
 - "occurred_on" is the date printed on the receipt (YYYY-MM-DD); if none, use {today}.
 - "currency" is a short code if determinable (e.g. THB, USD), else null.
+- "items": ONLY include this when the receipt clearly lists a few (2-6) distinct
+  line items in DIFFERENT categories worth splitting; each item's amount and its
+  own category. Omit it (or use []) for single-purpose receipts or long grocery
+  lists — in that case just give the one total.
 - If the image is not a receipt, or no total is readable, return {{"amount": null}}.
 """
 
 
 def extract_receipt(image_bytes: bytes, media_type: str = "image/jpeg") -> dict:
-    """Read a receipt photo and return expense data (``amount`` may be None)."""
+    """Read a receipt photo and return expense data (``amount`` may be None).
+
+    May include an ``items`` list when the receipt is worth splitting.
+    """
     system = _RECEIPT_SYSTEM.format(
-        today=date.today().isoformat(),
+        today=clock.today().isoformat(),
         expense_categories=", ".join(EXPENSE_CATEGORIES),
     )
     b64 = base64.standard_b64encode(image_bytes).decode("ascii")
@@ -217,6 +234,11 @@ def extract_receipt(image_bytes: bytes, media_type: str = "image/jpeg") -> dict:
         return {"amount": None}
     data["kind"] = "expense"
     data["category"] = _normalize_category("expense", data.get("category"))
+    items = data.get("items")
+    if isinstance(items, list):
+        for it in items:
+            if isinstance(it, dict):
+                it["category"] = _normalize_category("expense", it.get("category"))
     return data
 
 

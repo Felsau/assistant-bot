@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import os
-from datetime import date, timedelta
+from datetime import timedelta
 
 from supabase import Client, create_client
+
+from bot import clock
 
 _client: Client | None = None
 
@@ -81,8 +83,10 @@ def insert_transaction(user_id: str, data: dict) -> dict:
     return _first(_db().table("transactions").insert(row).execute().data)
 
 
-def list_transactions(user_id: str, start: str | None = None, limit: int = 200) -> list[dict]:
-    """Return the user's transactions, newest first, optionally since ``start``."""
+def list_transactions(
+    user_id: str, start: str | None = None, end: str | None = None, limit: int = 200
+) -> list[dict]:
+    """Return the user's transactions, newest first, within an optional range."""
     q = (
         _db()
         .table("transactions")
@@ -92,7 +96,109 @@ def list_transactions(user_id: str, start: str | None = None, limit: int = 200) 
     )
     if start:
         q = q.gte("occurred_on", start)
+    if end:
+        q = q.lte("occurred_on", end)
     return q.limit(limit).execute().data
+
+
+def get_task(user_id: str, task_id: str) -> dict | None:
+    res = _db().table("tasks").select("*").eq("user_id", user_id).eq("id", task_id).execute()
+    return res.data[0] if res.data else None
+
+
+def set_task_due(user_id: str, task_id: str, due_date: str) -> dict | None:
+    res = (
+        _db()
+        .table("tasks")
+        .update({"due_date": due_date})
+        .eq("user_id", user_id)
+        .eq("id", task_id)
+        .execute()
+    )
+    return res.data[0] if res.data else None
+
+
+def search(user_id: str, table: str, column: str, q: str, limit: int = 10) -> list[dict]:
+    """Case-insensitive substring search within one column the user owns."""
+    if table not in ("notes", "schedule", "tasks", "transactions"):
+        return []
+    return (
+        _db()
+        .table(table)
+        .select("*")
+        .eq("user_id", user_id)
+        .ilike(column, f"%{q}%")
+        .limit(limit)
+        .execute()
+        .data
+    )
+
+
+# --- reminders -------------------------------------------------------------
+
+def insert_reminder(user_id: str, data: dict) -> dict:
+    row = {"user_id": user_id, "text": data.get("text", ""), "remind_at": data.get("remind_at")}
+    return _first(_db().table("reminders").insert(row).execute().data)
+
+
+def due_reminders(before_iso: str, limit: int = 100) -> list[dict]:
+    return (
+        _db()
+        .table("reminders")
+        .select("*")
+        .eq("sent", False)
+        .lte("remind_at", before_iso)
+        .order("remind_at")
+        .limit(limit)
+        .execute()
+        .data
+    )
+
+
+def mark_reminder_sent(reminder_id: str) -> None:
+    _db().table("reminders").update({"sent": True}).eq("id", reminder_id).execute()
+
+
+# --- recurring expenses ----------------------------------------------------
+
+def insert_recurring(user_id: str, data: dict) -> dict:
+    row = {
+        "user_id": user_id,
+        "kind": data.get("kind", "expense"),
+        "amount": data.get("amount"),
+        "currency": data.get("currency"),
+        "category": data.get("category"),
+        "note": data.get("note"),
+        "day_of_month": data.get("day_of_month", 1),
+    }
+    return _first(_db().table("recurring").insert(row).execute().data)
+
+
+def list_recurring(user_id: str) -> list[dict]:
+    return (
+        _db()
+        .table("recurring")
+        .select("*")
+        .eq("user_id", user_id)
+        .order("day_of_month")
+        .execute()
+        .data
+    )
+
+
+def all_recurring(limit: int = 1000) -> list[dict]:
+    return _db().table("recurring").select("*").limit(limit).execute().data
+
+
+def delete_recurring(user_id: str, recurring_id: str) -> bool:
+    res = (
+        _db().table("recurring").delete().eq("user_id", user_id).eq("id", recurring_id).execute()
+    )
+    return bool(res.data)
+
+
+def mark_recurring_posted(recurring_id: str, posted_on: str) -> None:
+    _db().table("recurring").update({"last_posted": posted_on}).eq("id", recurring_id).execute()
 
 
 # --- task completion / deletion -------------------------------------------
@@ -176,9 +282,9 @@ def query(user_id: str, scope: str = "all") -> dict:
             .order("due_date")
         )
         if scope == "today":
-            tasks = tasks.lte("due_date", date.today().isoformat())
+            tasks = tasks.lte("due_date", clock.today().isoformat())
         elif scope == "week":
-            end = (date.today() + timedelta(days=7)).isoformat()
+            end = (clock.today() + timedelta(days=7)).isoformat()
             tasks = tasks.lte("due_date", end)
         result["tasks"] = tasks.execute().data
 
@@ -193,7 +299,7 @@ def query(user_id: str, scope: str = "all") -> dict:
         )
 
     if scope in ("expenses", "all"):
-        start = date.today().replace(day=1).isoformat()
+        start = clock.today().replace(day=1).isoformat()
         result["transactions"] = (
             db.table("transactions")
             .select("*")

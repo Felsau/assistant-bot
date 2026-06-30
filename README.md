@@ -28,11 +28,18 @@ delete), and can send a **morning digest** of your day.
 - `/spent` — this month's income, spending, and top categories
 - `/budget` — set or view monthly budgets (e.g. `/budget food 3000`,
   `/budget 20000` for an overall limit, `/budget food off` to remove)
+- `/report` — this month vs last month, with a category bar chart
+- `/find <text>` — search your notes, tasks, and expenses
+- `/recurring` — manage monthly recurring expenses (rent, subscriptions)
 - `/export` — download all your transactions as a CSV file
 - `/help` — usage
 
-After each expense, if a relevant budget exists, the bot appends a progress
-line (e.g. `food: 3,500 / 3,000 — over by 500`).
+Set a reminder by writing `remind me to call the bank at 3pm`. After each
+expense, if a relevant budget exists, the bot appends a progress line (e.g.
+`food: 3,500 / 3,000 — over by 500`). Tasks have a **+1 day** button to
+reschedule.
+
+Times use the `TIMEZONE` setting (default `Asia/Bangkok`).
 
 These register themselves as the bot's command menu on startup.
 
@@ -170,6 +177,13 @@ POST https://<your-app>/cron/daily-digest?secret=<CRON_SECRET>
 Use a free cron service such as [cron-job.org](https://cron-job.org) (set it to,
 say, 07:00 daily). On Render's free tier the web service sleeps when idle — the
 cron request itself wakes it.
+
+Two more cron endpoints (same `CRON_SECRET`):
+
+- `POST /cron/reminders` — delivers timed reminders that are due. Call it
+  frequently (every 1–5 minutes) so reminders fire close to their time.
+- `POST /cron/recurring` — posts recurring expenses whose day-of-month is today.
+  Call it once a day.
 
 ## Receipt scanning
 
