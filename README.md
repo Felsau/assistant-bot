@@ -16,8 +16,9 @@ Send it a message and it figures out what you meant:
 | `Coffee 60` / `Salary 30000 in` | logs an **expense / income** |
 | `What's on today?` / `How much did I spend?` | **queries** your data and answers |
 
-It also handles **voice messages**, gives every item **inline buttons**
-(done / delete), and can send a **morning digest** of your day.
+It also reads **photos of receipts** (snap a bill → it logs the expense),
+handles **voice messages**, gives every item **inline buttons** (done /
+delete), and can send a **morning digest** of your day.
 
 ### Commands
 
@@ -163,6 +164,14 @@ POST https://<your-app>/cron/daily-digest?secret=<CRON_SECRET>
 Use a free cron service such as [cron-job.org](https://cron-job.org) (set it to,
 say, 07:00 daily). On Render's free tier the web service sleeps when idle — the
 cron request itself wakes it.
+
+## Receipt scanning
+
+Send the bot a **photo of a receipt or bill** and it uses Claude's vision to
+read the grand total, merchant, date, and category, then logs it as an expense
+(with a Delete button, like any other entry). No extra setup or API key — it
+uses the same `ANTHROPIC_API_KEY`. If it can't find a total, it asks you to type
+the amount instead.
 
 ## Voice messages (optional)
 

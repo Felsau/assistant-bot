@@ -9,6 +9,7 @@ matching the Supabase schema. Returns a plain ``dict``::
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 from datetime import date
@@ -172,6 +173,51 @@ def _parse_json(text: str) -> dict:
 
     # Give up gracefully — treat the whole thing as a note.
     return {"type": "note", "data": {"content": text}}
+
+
+_RECEIPT_SYSTEM = """\
+You read a photo of a receipt or bill and return ONLY a JSON object, no prose:
+
+  {{"kind": "expense", "amount": number, "currency": string|null,
+    "category": string|null, "note": string|null, "occurred_on": "YYYY-MM-DD"|null}}
+
+- "amount" is the grand total actually paid (after tax and discounts). Number only.
+- "note" is the merchant / store name if visible.
+- "category" is the single best fit from: {expense_categories}. Use "other" if unsure.
+- "occurred_on" is the date printed on the receipt (YYYY-MM-DD); if none, use {today}.
+- "currency" is a short code if determinable (e.g. THB, USD), else null.
+- If the image is not a receipt, or no total is readable, return {{"amount": null}}.
+"""
+
+
+def extract_receipt(image_bytes: bytes, media_type: str = "image/jpeg") -> dict:
+    """Read a receipt photo and return expense data (``amount`` may be None)."""
+    system = _RECEIPT_SYSTEM.format(
+        today=date.today().isoformat(),
+        expense_categories=", ".join(EXPENSE_CATEGORIES),
+    )
+    b64 = base64.standard_b64encode(image_bytes).decode("ascii")
+
+    response = _client().messages.create(
+        model=_MODEL,
+        max_tokens=1024,
+        system=system,
+        messages=[{
+            "role": "user",
+            "content": [
+                {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": b64}},
+                {"type": "text", "text": "Extract this receipt as JSON."},
+            ],
+        }],
+    )
+
+    text = "".join(b.text for b in response.content if b.type == "text").strip()
+    data = _parse_json(text)
+    if data.get("type"):  # _parse_json wrapped a non-JSON reply as a note
+        return {"amount": None}
+    data["kind"] = "expense"
+    data["category"] = _normalize_category("expense", data.get("category"))
+    return data
 
 
 def format_query_reply(question: str, rows: dict) -> str:

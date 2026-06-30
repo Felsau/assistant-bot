@@ -39,6 +39,17 @@ def test_expense_without_amount_falls_back_to_note(monkeypatch):
     assert "Noted" in replies[0]["text"]
 
 
+def test_record_expense_from_receipt_data(monkeypatch):
+    # Simulates the receipt path: data already extracted from an image.
+    monkeypatch.setattr(supabase_client, "insert_transaction",
+                        lambda uid, d: {"id": "r1"})
+    replies = handlers.record_expense(
+        "u1", {"kind": "expense", "amount": 250, "category": "food", "note": "Cafe X"})
+    assert "Expense: 250" in replies[0]["text"]
+    assert "Cafe X" in replies[0]["text"]
+    assert replies[0]["reply_markup"]["inline_keyboard"][0][0]["callback_data"] == "del:transactions:r1"
+
+
 def test_spent_summary(monkeypatch):
     rows = [
         {"kind": "expense", "amount": 60, "category": "food"},

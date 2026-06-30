@@ -34,8 +34,9 @@ HELP_TEXT = (
     "/tasks   open tasks, with buttons to finish or delete\n"
     "/done <task>   mark a task done\n"
     "/spent   this month's totals by category\n\n"
-    "Log money by writing things like \"taxi 80\" or \"bonus 5000 in\". "
-    "Voice messages get transcribed."
+    "Log money by writing things like \"taxi 80\" or \"bonus 5000 in\", or "
+    "send a photo of a receipt and I'll read the total. Voice messages get "
+    "transcribed."
 )
 
 
@@ -114,11 +115,7 @@ def handle_message(user_id: str, text: str) -> list[dict]:
             # No amount detected — keep it as a note rather than lose it.
             row = supabase_client.insert_note(user_id, {"content": text})
             return [_reply(f"Noted: {text}", _delete_markup("notes", row.get("id")))]
-        row = supabase_client.insert_transaction(user_id, data)
-        return [_reply(
-            _describe_transaction(data),
-            _delete_markup("transactions", row.get("id")),
-        )]
+        return record_expense(user_id, data)
 
     if msg_type == "query":
         rows = supabase_client.query(user_id, data.get("scope", "all"))
@@ -127,6 +124,16 @@ def handle_message(user_id: str, text: str) -> list[dict]:
     # Unknown type — fall back to saving a note so nothing is lost.
     row = supabase_client.insert_note(user_id, {"content": text})
     return [_reply(f"Noted: {text}", _delete_markup("notes", row.get("id")))]
+
+
+def record_expense(user_id: str, data: dict) -> list[dict]:
+    """Insert an expense/income transaction and confirm it. Shared by the
+    text path and the receipt-photo path."""
+    row = supabase_client.insert_transaction(user_id, data)
+    return [_reply(
+        _describe_transaction(data),
+        _delete_markup("transactions", row.get("id")),
+    )]
 
 
 def handle_callback(user_id: str, data: str) -> dict:
