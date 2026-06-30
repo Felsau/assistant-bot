@@ -116,6 +116,11 @@ async def webhook(
 
     text = message.get("text")
 
+    # Photos → read as a receipt and log the expense.
+    if not text and message.get("photo"):
+        await _handle_receipt(chat_id, user_id, message["photo"][-1]["file_id"])
+        return {"ok": True}
+
     # Voice notes → transcribe, then treat the transcript as text.
     if not text and message.get("voice"):
         try:
@@ -141,6 +146,27 @@ async def webhook(
     for r in replies:
         await telegram_client.send_message(chat_id, r["text"], r.get("reply_markup"))
     return {"ok": True}
+
+
+async def _handle_receipt(chat_id: int, user_id: str, file_id: str) -> None:
+    """Download a photo, read it as a receipt, and log the expense."""
+    try:
+        image = await telegram_client.download_file(file_id)
+        data = classifier.extract_receipt(image)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[receipt] failed: {exc}")
+        await telegram_client.send_message(chat_id, "Couldn't read that image. Type the amount instead.")
+        return
+
+    if not data or data.get("amount") in (None, ""):
+        await telegram_client.send_message(
+            chat_id, "Couldn't find a total on that receipt. Type the amount instead."
+        )
+        return
+
+    replies = handlers.record_expense(user_id, data)
+    for r in replies:
+        await telegram_client.send_message(chat_id, r["text"], r.get("reply_markup"))
 
 
 async def _handle_callback(cb: dict) -> None:
