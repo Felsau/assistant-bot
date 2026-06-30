@@ -30,6 +30,13 @@ create table if not exists tasks (
   created_at timestamptz default now()
 );
 
+-- Known users, so scheduled jobs (e.g. the morning digest) know where to send.
+create table if not exists users (
+  user_id text primary key,
+  chat_id bigint not null,
+  created_at timestamptz default now()
+);
+
 -- Helpful indexes for per-user lookups.
 create index if not exists notes_user_idx on notes (user_id, created_at desc);
 create index if not exists schedule_user_idx on schedule (user_id, day_of_week);

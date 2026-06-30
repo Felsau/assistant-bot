@@ -1,4 +1,4 @@
-"""Thin wrapper around the Supabase client for the bot's three tables."""
+"""Thin wrapper around the Supabase client for the bot's tables."""
 
 from __future__ import annotations
 
@@ -20,11 +20,29 @@ def _db() -> Client:
     return _client
 
 
+def _first(data) -> dict:
+    """Return the first row of an insert/update result, or an empty dict."""
+    return (data or [{}])[0] if isinstance(data, list) else (data or {})
+
+
+# --- users -----------------------------------------------------------------
+
+def upsert_user(user_id: str, chat_id: int) -> None:
+    """Remember this user so scheduled jobs know which chat to message."""
+    _db().table("users").upsert(
+        {"user_id": user_id, "chat_id": chat_id}, on_conflict="user_id"
+    ).execute()
+
+
+def list_users() -> list[dict]:
+    return _db().table("users").select("user_id, chat_id").execute().data
+
+
 # --- inserts ---------------------------------------------------------------
 
 def insert_note(user_id: str, data: dict) -> dict:
     row = {"user_id": user_id, "content": data.get("content", "")}
-    return _db().table("notes").insert(row).execute().data
+    return _first(_db().table("notes").insert(row).execute().data)
 
 
 def insert_schedule(user_id: str, data: dict) -> dict:
@@ -37,7 +55,7 @@ def insert_schedule(user_id: str, data: dict) -> dict:
         "location": data.get("location"),
         "notes": data.get("notes"),
     }
-    return _db().table("schedule").insert(row).execute().data
+    return _first(_db().table("schedule").insert(row).execute().data)
 
 
 def insert_task(user_id: str, data: dict) -> dict:
@@ -47,7 +65,52 @@ def insert_task(user_id: str, data: dict) -> dict:
         "due_date": data.get("due_date"),
         "priority": data.get("priority", "normal"),
     }
-    return _db().table("tasks").insert(row).execute().data
+    return _first(_db().table("tasks").insert(row).execute().data)
+
+
+# --- task completion / deletion -------------------------------------------
+
+def open_tasks(user_id: str, like: str | None = None, limit: int = 20) -> list[dict]:
+    """Return the user's incomplete tasks, optionally filtered by title."""
+    q = (
+        _db()
+        .table("tasks")
+        .select("*")
+        .eq("user_id", user_id)
+        .eq("is_done", False)
+        .order("due_date")
+    )
+    if like:
+        q = q.ilike("title", f"%{like}%")
+    return q.limit(limit).execute().data
+
+
+def complete_task(user_id: str, task_id: str) -> dict | None:
+    """Mark a task done; return the updated row, or None if not found."""
+    res = (
+        _db()
+        .table("tasks")
+        .update({"is_done": True})
+        .eq("user_id", user_id)
+        .eq("id", task_id)
+        .execute()
+    )
+    return res.data[0] if res.data else None
+
+
+def delete_row(user_id: str, table: str, row_id: str) -> bool:
+    """Delete a row the user owns from one of the content tables."""
+    if table not in ("notes", "schedule", "tasks"):
+        return False
+    res = (
+        _db()
+        .table(table)
+        .delete()
+        .eq("user_id", user_id)
+        .eq("id", row_id)
+        .execute()
+    )
+    return bool(res.data)
 
 
 # --- queries ---------------------------------------------------------------

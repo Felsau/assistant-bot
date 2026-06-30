@@ -17,8 +17,19 @@ from anthropic import Anthropic
 
 _MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-6")
 
-# A single shared client; reads ANTHROPIC_API_KEY from the environment.
-_client = Anthropic()
+_client_instance: Anthropic | None = None
+
+
+def _client() -> Anthropic:
+    """Lazily build the Anthropic client (so imports don't need a key).
+
+    ``max_retries`` lets the SDK ride out transient 429/5xx with backoff.
+    """
+    global _client_instance
+    if _client_instance is None:
+        _client_instance = Anthropic(max_retries=4)
+    return _client_instance
+
 
 _SYSTEM_PROMPT = """\
 You are the routing brain of a personal assistant bot. Classify the user's \
@@ -63,10 +74,12 @@ def classify(message: str) -> dict:
     """Classify ``message`` and return ``{"type": ..., "data": {...}}``."""
     system = _SYSTEM_PROMPT.format(today=date.today().isoformat())
 
-    response = _client.messages.create(
+    response = _client().messages.create(
         model=_MODEL,
         max_tokens=1024,
-        system=system,
+        # Marked cacheable so the static instructions are reused once the prompt
+        # is large enough to cross the model's minimum cache size.
+        system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
         messages=[{"role": "user", "content": message}],
     )
 
@@ -98,7 +111,7 @@ def _parse_json(text: str) -> dict:
 
 def format_query_reply(question: str, rows: dict) -> str:
     """Ask Claude to turn raw query rows into a friendly natural-language reply."""
-    response = _client.messages.create(
+    response = _client().messages.create(
         model=_MODEL,
         max_tokens=1024,
         system=(

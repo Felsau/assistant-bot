@@ -15,6 +15,18 @@ Send it a message and it figures out what you meant:
 | `Submit the OS assignment by Friday` | saves a **task** |
 | `What's on today?` | **queries** your data and answers |
 
+It also handles **voice messages**, gives every item **inline buttons**
+(✅ done / 🗑 delete), and can send a **morning digest** of your day.
+
+### Commands
+
+- `/today` — what's on today
+- `/tasks` — your open tasks, each with ✅ / 🗑 buttons
+- `/done <task>` — mark a task complete (or `/done` to pick from a list)
+- `/help` — usage
+
+These register themselves as the bot's command menu on startup.
+
 ## Architecture
 
 ```
@@ -80,6 +92,11 @@ Fill in `.env`:
 - `ANTHROPIC_API_KEY` – from the [Anthropic Console](https://console.anthropic.com/)
 - `SUPABASE_URL` / `SUPABASE_KEY` – from your Supabase project settings
 - `TELEGRAM_WEBHOOK_SECRET` – any random string (used to verify webhook calls)
+- `ALLOWED_USER_IDS` – **recommended**: comma-separated Telegram user IDs
+  allowed to use the bot (find yours via [@userinfobot](https://t.me/userinfobot)).
+  Leaving it empty lets anyone use the bot and spend your Claude credit.
+- `CRON_SECRET` – any random string, protects the daily-digest endpoint
+- `OPENAI_API_KEY` – *optional*, enables voice transcription (Whisper)
 
 ### 3. Create the database
 
@@ -130,6 +147,37 @@ A [`Procfile`](Procfile) is included, so Railway and similar platforms run the
 app directly. Set the same environment variables in the host's dashboard. On
 Railway the public URL is auto-detected; elsewhere set `WEBHOOK_URL` to the
 deployed base URL.
+
+## Morning digest (scheduled)
+
+The app exposes `POST /cron/daily-digest`, which messages every known user a
+friendly summary of their day. It's protected by `CRON_SECRET`, so point a free
+scheduler at it once a day:
+
+```
+POST https://<your-app>/cron/daily-digest?secret=<CRON_SECRET>
+```
+
+Use a free cron service such as [cron-job.org](https://cron-job.org) (set it to,
+say, 07:00 daily). On Render's free tier the web service sleeps when idle — the
+cron request itself wakes it.
+
+## Voice messages (optional)
+
+Send the bot a voice note and it transcribes it, then treats the transcript like
+a typed message. This requires `OPENAI_API_KEY` (Whisper). Without it, voice is
+disabled and the bot asks you to type. This is the only non-Claude dependency and
+it's entirely optional.
+
+## Tests
+
+```bash
+pip install -r requirements-dev.txt
+pytest
+```
+
+The tests mock the Claude and Supabase clients, so they need no API keys or
+network access.
 
 ## How classification works
 
