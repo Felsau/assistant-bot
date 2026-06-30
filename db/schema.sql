@@ -30,6 +30,19 @@ create table if not exists tasks (
   created_at timestamptz default now()
 );
 
+-- Money in/out — simple personal bookkeeping.
+create table if not exists transactions (
+  id uuid primary key default gen_random_uuid(),
+  user_id text not null,
+  kind text not null default 'expense',   -- expense / income
+  amount numeric not null,
+  currency text,
+  category text,
+  note text,
+  occurred_on date default current_date,
+  created_at timestamptz default now()
+);
+
 -- Known users, so scheduled jobs (e.g. the morning digest) know where to send.
 create table if not exists users (
   user_id text primary key,
@@ -41,3 +54,4 @@ create table if not exists users (
 create index if not exists notes_user_idx on notes (user_id, created_at desc);
 create index if not exists schedule_user_idx on schedule (user_id, day_of_week);
 create index if not exists tasks_user_idx on tasks (user_id, due_date);
+create index if not exists transactions_user_idx on transactions (user_id, occurred_on desc);

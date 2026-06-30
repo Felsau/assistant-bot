@@ -13,7 +13,8 @@ Send it a message and it figures out what you meant:
 | `Remember that my wifi password is hunter2` | saves a **note** |
 | `Class on Monday 09:00–11:00 in room 301` | saves a **schedule** entry |
 | `Submit the OS assignment by Friday` | saves a **task** |
-| `What's on today?` | **queries** your data and answers |
+| `Coffee 60` / `Salary 30000 in` | logs an **expense / income** |
+| `What's on today?` / `How much did I spend?` | **queries** your data and answers |
 
 It also handles **voice messages**, gives every item **inline buttons**
 (✅ done / 🗑 delete), and can send a **morning digest** of your day.
@@ -23,6 +24,7 @@ It also handles **voice messages**, gives every item **inline buttons**
 - `/today` — what's on today
 - `/tasks` — your open tasks, each with ✅ / 🗑 buttons
 - `/done <task>` — mark a task complete (or `/done` to pick from a list)
+- `/spent` — this month's income, spending, and top categories
 - `/help` — usage
 
 These register themselves as the bot's command menu on startup.
@@ -185,7 +187,7 @@ Each message is sent to Claude with a system prompt asking it to return JSON:
 
 ```json
 {
-  "type": "note" | "schedule" | "task" | "query",
+  "type": "note" | "schedule" | "task" | "expense" | "query",
   "data": { ...fields for that type... }
 }
 ```
@@ -196,8 +198,9 @@ Examples:
 {"type": "note", "data": {"content": "wifi password is hunter2"}}
 {"type": "schedule", "data": {"title": "Class", "day_of_week": "Monday", "start_time": "09:00", "end_time": "11:00", "location": "room 301"}}
 {"type": "task", "data": {"title": "Submit OS assignment", "due_date": "2026-07-03", "priority": "normal"}}
-{"type": "query", "data": {"scope": "today"}}
+{"type": "expense", "data": {"kind": "expense", "amount": 60, "category": "food", "note": "coffee"}}
+{"type": "query", "data": {"scope": "expenses"}}
 ```
 
-`note` / `schedule` / `task` get inserted into Supabase. `query` reads the
-relevant rows back and asks Claude to format a friendly reply.
+`note` / `schedule` / `task` / `expense` get inserted into Supabase. `query`
+reads the relevant rows back and asks Claude to format a friendly reply.
