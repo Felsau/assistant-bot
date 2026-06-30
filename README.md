@@ -26,7 +26,13 @@ delete), and can send a **morning digest** of your day.
 - `/tasks` — your open tasks, each with ✅ / 🗑 buttons
 - `/done <task>` — mark a task complete (or `/done` to pick from a list)
 - `/spent` — this month's income, spending, and top categories
+- `/budget` — set or view monthly budgets (e.g. `/budget food 3000`,
+  `/budget 20000` for an overall limit, `/budget food off` to remove)
+- `/export` — download all your transactions as a CSV file
 - `/help` — usage
+
+After each expense, if a relevant budget exists, the bot appends a progress
+line (e.g. `food: 3,500 / 3,000 — over by 500`).
 
 These register themselves as the bot's command menu on startup.
 

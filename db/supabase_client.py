@@ -140,6 +140,26 @@ def delete_row(user_id: str, table: str, row_id: str) -> bool:
     return bool(res.data)
 
 
+# --- budgets ---------------------------------------------------------------
+
+def set_budget(user_id: str, category: str, amount: float) -> None:
+    _db().table("budgets").upsert(
+        {"user_id": user_id, "category": category, "amount": amount},
+        on_conflict="user_id,category",
+    ).execute()
+
+
+def delete_budget(user_id: str, category: str) -> None:
+    _db().table("budgets").delete().eq("user_id", user_id).eq("category", category).execute()
+
+
+def get_budgets(user_id: str) -> dict[str, float]:
+    rows = (
+        _db().table("budgets").select("category, amount").eq("user_id", user_id).execute().data
+    )
+    return {r["category"]: float(r["amount"]) for r in rows}
+
+
 # --- queries ---------------------------------------------------------------
 
 def query(user_id: str, scope: str = "all") -> dict:
