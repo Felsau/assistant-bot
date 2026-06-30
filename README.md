@@ -4,6 +4,8 @@ A personal assistant bot for **Telegram** that understands natural-language
 messages, classifies them with the **Claude API**, and stores/retrieves the
 data in **Supabase (Postgres)**.
 
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/Felsau/assistant-bot)
+
 Send it a message and it figures out what you meant:
 
 | You type | The bot does |
@@ -97,6 +99,12 @@ ngrok http 8000        # or: lt --port 8000
 
 ### 5. Register the webhook with Telegram
 
+The app **registers its own webhook on startup** whenever it can determine its
+public URL (from `WEBHOOK_URL`, or automatically on Render/Railway). For local
+development, set `WEBHOOK_URL` to your tunnel URL in `.env` and restart — done.
+
+If you'd rather do it by hand:
+
 ```bash
 curl "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/setWebhook" \
   -d "url=https://<your-public-url>/webhook" \
@@ -107,17 +115,21 @@ Now message your bot on Telegram.
 
 ## Deploy
 
-Push to GitHub and deploy on Railway / Render / Fly.io. Set the same
-environment variables in the host's dashboard, then re-run the `setWebhook`
-call above with your deployed URL.
+### One click (Render)
 
-```bash
-git init -b main
-git add .
-git commit -m "Initial commit: Personal Assistant Bot"
-git remote add origin <REPO_URL>
-git push -u origin main
-```
+1. Click the **Deploy to Render** button at the top of this README.
+2. Render reads [`render.yaml`](render.yaml) and prompts for the four secrets
+   (`TELEGRAM_BOT_TOKEN`, `ANTHROPIC_API_KEY`, `SUPABASE_URL`, `SUPABASE_KEY`).
+   The webhook secret is generated automatically.
+3. On boot the app detects its `RENDER_EXTERNAL_URL` and registers the Telegram
+   webhook itself — no extra step.
+
+### Other hosts (Railway / Fly.io)
+
+A [`Procfile`](Procfile) is included, so Railway and similar platforms run the
+app directly. Set the same environment variables in the host's dashboard. On
+Railway the public URL is auto-detected; elsewhere set `WEBHOOK_URL` to the
+deployed base URL.
 
 ## How classification works
 
