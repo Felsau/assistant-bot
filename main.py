@@ -36,6 +36,7 @@ _BOT_COMMANDS = [
     {"command": "today", "description": "What's on today"},
     {"command": "tasks", "description": "Show my open tasks"},
     {"command": "done", "description": "Mark a task complete"},
+    {"command": "spent", "description": "This month's spending summary"},
 ]
 
 

@@ -68,6 +68,33 @@ def insert_task(user_id: str, data: dict) -> dict:
     return _first(_db().table("tasks").insert(row).execute().data)
 
 
+def insert_transaction(user_id: str, data: dict) -> dict:
+    row = {
+        "user_id": user_id,
+        "kind": data.get("kind", "expense"),
+        "amount": data.get("amount"),
+        "currency": data.get("currency"),
+        "category": data.get("category"),
+        "note": data.get("note"),
+        "occurred_on": data.get("occurred_on"),
+    }
+    return _first(_db().table("transactions").insert(row).execute().data)
+
+
+def list_transactions(user_id: str, start: str | None = None, limit: int = 200) -> list[dict]:
+    """Return the user's transactions, newest first, optionally since ``start``."""
+    q = (
+        _db()
+        .table("transactions")
+        .select("*")
+        .eq("user_id", user_id)
+        .order("occurred_on", desc=True)
+    )
+    if start:
+        q = q.gte("occurred_on", start)
+    return q.limit(limit).execute().data
+
+
 # --- task completion / deletion -------------------------------------------
 
 def open_tasks(user_id: str, like: str | None = None, limit: int = 20) -> list[dict]:
@@ -100,7 +127,7 @@ def complete_task(user_id: str, task_id: str) -> dict | None:
 
 def delete_row(user_id: str, table: str, row_id: str) -> bool:
     """Delete a row the user owns from one of the content tables."""
-    if table not in ("notes", "schedule", "tasks"):
+    if table not in ("notes", "schedule", "tasks", "transactions"):
         return False
     res = (
         _db()
@@ -141,6 +168,18 @@ def query(user_id: str, scope: str = "all") -> dict:
             .select("*")
             .eq("user_id", user_id)
             .order("start_time")
+            .execute()
+            .data
+        )
+
+    if scope in ("expenses", "all"):
+        start = date.today().replace(day=1).isoformat()
+        result["transactions"] = (
+            db.table("transactions")
+            .select("*")
+            .eq("user_id", user_id)
+            .gte("occurred_on", start)
+            .order("occurred_on", desc=True)
             .execute()
             .data
         )

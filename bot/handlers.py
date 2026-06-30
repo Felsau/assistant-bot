@@ -11,6 +11,8 @@ own buttons. ``handle_callback`` handles taps on those buttons.
 
 from __future__ import annotations
 
+from datetime import date
+
 from ai import classifier
 from db import supabase_client
 
@@ -20,8 +22,9 @@ START_TEXT = (
     "• \"Remember my locker code is 4821\" → I save a note\n"
     "• \"Math class Monday 9-11 in room 301\" → I save your schedule\n"
     "• \"Submit the report by Friday\" → I save a task\n"
+    "• \"Coffee 60\" / \"Salary 30000 in\" → I log money in/out\n"
     "• \"What's on today?\" → I look it up and tell you\n\n"
-    "Commands: /today  /tasks  /done  /help\n"
+    "Commands: /today  /tasks  /done  /spent  /help\n"
     "You can also send a voice message."
 )
 
@@ -31,7 +34,9 @@ HELP_TEXT = (
     "• /today — what's on today\n"
     "• /tasks — your open tasks (tap ✅ to finish, 🗑 to delete)\n"
     "• /done <task> — mark a task complete\n"
-    "Tip: send a voice message and I'll transcribe it."
+    "• /spent — this month's income, spending, and top categories\n"
+    "Tip: log money by typing things like \"taxi 80\" or \"bonus 5000 in\", "
+    "and send a voice message and I'll transcribe it."
 )
 
 
@@ -77,6 +82,8 @@ def handle_message(user_id: str, text: str) -> list[dict]:
         return _list_open_tasks(user_id)
     if text.startswith("/done"):
         return _handle_done(user_id, text[len("/done"):].strip())
+    if text.startswith("/spent") or text.startswith("/expenses"):
+        return _month_summary(user_id)
 
     result = classifier.classify(text)
     msg_type = result.get("type", "note")
@@ -101,6 +108,17 @@ def handle_message(user_id: str, text: str) -> list[dict]:
         return [_reply(
             "✅ Task added: " + _describe_task(data),
             _task_markup(row.get("id")),
+        )]
+
+    if msg_type == "expense":
+        if data.get("amount") in (None, ""):
+            # No amount detected — don't lose it; keep it as a note.
+            row = supabase_client.insert_note(user_id, {"content": text})
+            return [_reply(f"📝 Noted: {text}", _delete_markup("notes", row.get("id")))]
+        row = supabase_client.insert_transaction(user_id, data)
+        return [_reply(
+            _describe_transaction(data),
+            _delete_markup("transactions", row.get("id")),
         )]
 
     if msg_type == "query":
@@ -165,6 +183,59 @@ def _handle_done(user_id: str, arg: str) -> list[dict]:
     for t in matches:
         replies.append(_reply("• " + _describe_task(t), _task_markup(t["id"])))
     return replies
+
+
+def _month_summary(user_id: str) -> list[dict]:
+    start = date.today().replace(day=1)
+    rows = supabase_client.list_transactions(user_id, start.isoformat())
+    if not rows:
+        return [_reply("No money logged this month yet. Try \"coffee 60\". 💸")]
+
+    income = sum(_num(r.get("amount")) for r in rows if r.get("kind") == "income")
+    expense = sum(_num(r.get("amount")) for r in rows if r.get("kind", "expense") != "income")
+
+    by_category: dict[str, float] = {}
+    for r in rows:
+        if r.get("kind", "expense") != "income":
+            cat = r.get("category") or "Other"
+            by_category[cat] = by_category.get(cat, 0) + _num(r.get("amount"))
+
+    lines = [
+        f"📊 {start.strftime('%B %Y')}",
+        f"💸 Spent: {_fmt(expense)}",
+        f"💰 Income: {_fmt(income)}",
+        f"💼 Net: {_fmt(income - expense)}",
+    ]
+    if by_category:
+        lines.append("\nTop categories:")
+        for cat, amt in sorted(by_category.items(), key=lambda kv: -kv[1])[:5]:
+            lines.append(f"  • {cat}: {_fmt(amt)}")
+    return [_reply("\n".join(lines))]
+
+
+def _describe_transaction(data: dict) -> str:
+    kind = data.get("kind", "expense")
+    label = "💰 Income" if kind == "income" else "💸 Expense"
+    amount = _fmt(_num(data.get("amount")))
+    currency = data.get("currency")
+    head = f"{label}: {amount}{(' ' + currency) if currency else ''}"
+    extras = [x for x in (data.get("category"), data.get("note")) if x]
+    if extras:
+        head += " — " + " · ".join(extras)
+    if data.get("occurred_on"):
+        head += f" ({data['occurred_on']})"
+    return head
+
+
+def _num(value) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _fmt(n: float) -> str:
+    return f"{n:,.0f}" if float(n).is_integer() else f"{n:,.2f}"
 
 
 def _describe_schedule(data: dict) -> str:

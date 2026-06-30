@@ -57,15 +57,28 @@ Types and their data fields:
                      "due_date": "YYYY-MM-DD"|null,
                      "priority": "low"|"normal"|"high"}}
 
+- "expense"  money spent or received (bookkeeping).
+             data: {{"kind": "expense"|"income",
+                     "amount": number,
+                     "currency": string|null,    // e.g. "THB", "USD"
+                     "category": string|null,    // e.g. "food", "transport"
+                     "note": string|null,
+                     "occurred_on": "YYYY-MM-DD"|null}}
+
 - "query"    the user is asking about their stored data.
-             data: {{"scope": "today"|"week"|"tasks"|"schedule"|"notes"|"all"}}
+             data: {{"scope": "today"|"week"|"tasks"|"schedule"|"notes"|"expenses"|"all"}}
 
 Rules:
 - Today's date is {today}. Resolve relative dates ("tomorrow", "Friday") to an
   absolute YYYY-MM-DD.
 - Times are 24-hour "HH:MM". Use null for anything not stated.
 - Default task priority is "normal".
-- If the message is a question about what the user has saved, it's a "query".
+- For "expense": a bare amount with a thing bought (e.g. "coffee 60", "lunch 120
+  baht") is kind "expense"; words like salary/refund/received/income mean kind
+  "income". Extract a numeric "amount". Infer a short "category" when obvious.
+  Default occurred_on to today if no date is given.
+- Questions about spending/budget/how much was spent are "query" with scope
+  "expenses".
 - Match the user's language in any text you echo back.
 """
 
