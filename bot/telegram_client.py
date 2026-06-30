@@ -51,6 +51,25 @@ async def answer_callback_query(callback_query_id: str, text: str | None = None)
     await _post("answerCallbackQuery", payload)
 
 
+async def send_document(
+    chat_id: int | str,
+    filename: str,
+    content: bytes,
+    caption: str | None = None,
+    mime: str = "text/csv",
+) -> None:
+    """Upload a file to a chat (used for CSV export)."""
+    url = f"{_API_BASE}/bot{_token()}/sendDocument"
+    data: dict = {"chat_id": str(chat_id)}
+    if caption:
+        data["caption"] = caption
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.post(
+            url, data=data, files={"document": (filename, content, mime)}
+        )
+        resp.raise_for_status()
+
+
 async def download_file(file_id: str) -> bytes:
     """Resolve a Telegram file_id and download its bytes (used for voice)."""
     async with httpx.AsyncClient(timeout=30) as client:

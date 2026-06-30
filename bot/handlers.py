@@ -11,6 +11,8 @@ own buttons. ``handle_callback`` handles taps on those buttons.
 
 from __future__ import annotations
 
+import csv
+import io
 from datetime import date
 
 from ai import classifier
@@ -33,7 +35,9 @@ HELP_TEXT = (
     "/today   what's on today\n"
     "/tasks   open tasks, with buttons to finish or delete\n"
     "/done <task>   mark a task done\n"
-    "/spent   this month's totals by category\n\n"
+    "/spent   this month's totals by category\n"
+    "/budget   set or view monthly budgets (e.g. /budget food 3000)\n"
+    "/export   download your transactions as CSV\n\n"
     "Log money by writing things like \"taxi 80\" or \"bonus 5000 in\", or "
     "send a photo of a receipt and I'll read the total. Voice messages get "
     "transcribed."
@@ -84,6 +88,8 @@ def handle_message(user_id: str, text: str) -> list[dict]:
         return _handle_done(user_id, text[len("/done"):].strip())
     if text.startswith("/spent") or text.startswith("/expenses"):
         return _month_summary(user_id)
+    if text.startswith("/budget"):
+        return _handle_budget(user_id, text[len("/budget"):].strip())
 
     result = classifier.classify(text)
     msg_type = result.get("type", "note")
@@ -128,12 +134,13 @@ def handle_message(user_id: str, text: str) -> list[dict]:
 
 def record_expense(user_id: str, data: dict) -> list[dict]:
     """Insert an expense/income transaction and confirm it. Shared by the
-    text path and the receipt-photo path."""
+    text path and the receipt-photo path. Appends a budget line if relevant."""
     row = supabase_client.insert_transaction(user_id, data)
-    return [_reply(
-        _describe_transaction(data),
-        _delete_markup("transactions", row.get("id")),
-    )]
+    text = _describe_transaction(data)
+    alert = _budget_alert(user_id, data)
+    if alert:
+        text += "\n" + alert
+    return [_reply(text, _delete_markup("transactions", row.get("id")))]
 
 
 def handle_callback(user_id: str, data: str) -> dict:
@@ -191,23 +198,27 @@ def _handle_done(user_id: str, arg: str) -> list[dict]:
     return replies
 
 
-def _month_summary(user_id: str) -> list[dict]:
+def _month_expenses(user_id: str):
+    """Return (income, expense_total, {category: spent}) for the current month."""
     start = date.today().replace(day=1)
     rows = supabase_client.list_transactions(user_id, start.isoformat())
-    if not rows:
-        return [_reply("Nothing logged this month yet.")]
-
     income = sum(_num(r.get("amount")) for r in rows if r.get("kind") == "income")
-    expense = sum(_num(r.get("amount")) for r in rows if r.get("kind", "expense") != "income")
-
+    total = sum(_num(r.get("amount")) for r in rows if r.get("kind", "expense") != "income")
     by_category: dict[str, float] = {}
     for r in rows:
         if r.get("kind", "expense") != "income":
-            cat = r.get("category") or "Other"
+            cat = r.get("category") or "other"
             by_category[cat] = by_category.get(cat, 0) + _num(r.get("amount"))
+    return income, total, by_category
+
+
+def _month_summary(user_id: str) -> list[dict]:
+    income, expense, by_category = _month_expenses(user_id)
+    if not income and not expense:
+        return [_reply("Nothing logged this month yet.")]
 
     lines = [
-        start.strftime("%B %Y"),
+        date.today().strftime("%B %Y"),
         f"Spent: {_fmt(expense)}",
         f"Income: {_fmt(income)}",
         f"Net: {_fmt(income - expense)}",
@@ -218,6 +229,97 @@ def _month_summary(user_id: str) -> list[dict]:
         for cat, amt in sorted(by_category.items(), key=lambda kv: -kv[1])[:5]:
             lines.append(f"  {cat} {_fmt(amt)}")
     return [_reply("\n".join(lines))]
+
+
+def _handle_budget(user_id: str, arg: str) -> list[dict]:
+    if not arg:
+        return _budget_status(user_id)
+
+    parts = arg.split()
+    amount_token = parts[-1].lower()
+    raw_category = " ".join(parts[:-1]).lower().strip()
+
+    if not raw_category:
+        category = "total"
+    elif raw_category in ("total", "overall", "all"):
+        category = "total"
+    else:
+        category = classifier._normalize_category("expense", raw_category)
+
+    if amount_token in ("off", "none", "remove", "0"):
+        supabase_client.delete_budget(user_id, category)
+        return [_reply(f"Removed the {category} budget.")]
+
+    try:
+        amount = float(amount_token.replace(",", ""))
+    except ValueError:
+        return [_reply(
+            "Usage: /budget food 3000  (or /budget 20000 for an overall limit, "
+            "/budget food off to remove)"
+        )]
+    if amount <= 0:
+        supabase_client.delete_budget(user_id, category)
+        return [_reply(f"Removed the {category} budget.")]
+
+    supabase_client.set_budget(user_id, category, amount)
+    return [_reply(f"Budget set: {category} {_fmt(amount)} / month.")]
+
+
+def _budget_status(user_id: str) -> list[dict]:
+    budgets = supabase_client.get_budgets(user_id)
+    if not budgets:
+        return [_reply(
+            "No budgets set. Try \"/budget food 3000\" or \"/budget 20000\" for "
+            "an overall monthly limit."
+        )]
+    _, total, by_category = _month_expenses(user_id)
+    lines = [f"Budgets, {date.today():%B %Y}"]
+    if "total" in budgets:
+        lines.append(_budget_line("total", total, budgets["total"]))
+    for cat in sorted(c for c in budgets if c != "total"):
+        lines.append(_budget_line(cat, by_category.get(cat, 0), budgets[cat]))
+    return [_reply("\n".join(lines))]
+
+
+def _budget_alert(user_id: str, data: dict) -> str | None:
+    """A short budget status line to append after logging an expense."""
+    if data.get("kind") == "income":
+        return None
+    budgets = supabase_client.get_budgets(user_id)
+    if not budgets:
+        return None
+    category = data.get("category")
+    _, total, by_category = _month_expenses(user_id)
+    lines = []
+    if category and category in budgets:
+        lines.append(_budget_line(category, by_category.get(category, 0), budgets[category]))
+    if "total" in budgets:
+        lines.append(_budget_line("total", total, budgets["total"]))
+    return "\n".join(lines) if lines else None
+
+
+def _budget_line(name: str, spent: float, limit: float) -> str:
+    if limit and spent > limit:
+        return f"{name}: {_fmt(spent)} / {_fmt(limit)} — over by {_fmt(spent - limit)}"
+    pct = (spent / limit * 100) if limit else 0
+    return f"{name}: {_fmt(spent)} / {_fmt(limit)} ({pct:.0f}%)"
+
+
+def build_transactions_csv(rows: list[dict]) -> bytes:
+    """Serialize transactions to CSV bytes (UTF-8 BOM, Excel-friendly)."""
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["date", "kind", "amount", "currency", "category", "note"])
+    for r in rows:
+        writer.writerow([
+            r.get("occurred_on", "") or "",
+            r.get("kind", "expense") or "",
+            r.get("amount", "") if r.get("amount") is not None else "",
+            r.get("currency", "") or "",
+            r.get("category", "") or "",
+            r.get("note", "") or "",
+        ])
+    return buf.getvalue().encode("utf-8-sig")
 
 
 def _describe_transaction(data: dict) -> str:

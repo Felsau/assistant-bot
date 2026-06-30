@@ -11,6 +11,7 @@ def test_expense_is_recorded(monkeypatch):
         "data": {"kind": "expense", "amount": 60, "category": "food", "note": "coffee"},
     })
     monkeypatch.setattr(supabase_client, "insert_transaction", lambda uid, d: {"id": "x1"})
+    monkeypatch.setattr(supabase_client, "get_budgets", lambda uid: {})
 
     replies = handlers.handle_message("u1", "coffee 60")
     assert "Expense" in replies[0]["text"]
@@ -43,6 +44,7 @@ def test_record_expense_from_receipt_data(monkeypatch):
     # Simulates the receipt path: data already extracted from an image.
     monkeypatch.setattr(supabase_client, "insert_transaction",
                         lambda uid, d: {"id": "r1"})
+    monkeypatch.setattr(supabase_client, "get_budgets", lambda uid: {})
     replies = handlers.record_expense(
         "u1", {"kind": "expense", "amount": 250, "category": "food", "note": "Cafe X"})
     assert "Expense: 250" in replies[0]["text"]

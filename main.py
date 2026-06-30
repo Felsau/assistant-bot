@@ -37,6 +37,8 @@ _BOT_COMMANDS = [
     {"command": "tasks", "description": "Show my open tasks"},
     {"command": "done", "description": "Mark a task complete"},
     {"command": "spent", "description": "This month's spending summary"},
+    {"command": "budget", "description": "Set or view monthly budgets"},
+    {"command": "export", "description": "Download your transactions as CSV"},
 ]
 
 
@@ -138,6 +140,11 @@ async def webhook(
             return {"ok": True}
         await telegram_client.send_message(chat_id, f'"{text}"')
 
+    # /export sends a file, so it's handled here rather than via handle_message.
+    if text and text.startswith("/export"):
+        await _handle_export(chat_id, user_id)
+        return {"ok": True}
+
     try:
         replies = handlers.handle_message(user_id, text)
     except Exception as exc:  # noqa: BLE001 — never 500 back to Telegram
@@ -167,6 +174,18 @@ async def _handle_receipt(chat_id: int, user_id: str, file_id: str) -> None:
     replies = handlers.record_expense(user_id, data)
     for r in replies:
         await telegram_client.send_message(chat_id, r["text"], r.get("reply_markup"))
+
+
+async def _handle_export(chat_id: int, user_id: str) -> None:
+    """Export all of the user's transactions as a CSV file."""
+    rows = supabase_client.list_transactions(user_id, limit=10000)
+    if not rows:
+        await telegram_client.send_message(chat_id, "Nothing to export yet.")
+        return
+    csv_bytes = handlers.build_transactions_csv(rows)
+    await telegram_client.send_document(
+        chat_id, "transactions.csv", csv_bytes, caption="Your transactions"
+    )
 
 
 async def _handle_callback(cb: dict) -> None:

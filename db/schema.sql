@@ -43,6 +43,15 @@ create table if not exists transactions (
   created_at timestamptz default now()
 );
 
+-- Monthly budgets per category ('total' = overall monthly limit).
+create table if not exists budgets (
+  user_id text not null,
+  category text not null,
+  amount numeric not null,
+  created_at timestamptz default now(),
+  primary key (user_id, category)
+);
+
 -- Known users, so scheduled jobs (e.g. the morning digest) know where to send.
 create table if not exists users (
   user_id text primary key,
