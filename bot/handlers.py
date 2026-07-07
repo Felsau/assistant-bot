@@ -14,11 +14,42 @@ from __future__ import annotations
 import csv
 import io
 import os
+import uuid
+from collections import OrderedDict
 from datetime import datetime, timedelta
 
 from ai import classifier
 from bot import clock
 from db import supabase_client
+
+# Recently deleted rows, kept briefly so an "Undo" tap can restore them. Keyed by
+# the deleted row's id. In-memory and per-process (like the webhook de-dup): fine
+# for a single instance, and undo is inherently short-lived anyway.
+_UNDO: "OrderedDict[str, tuple]" = OrderedDict()
+_UNDO_MAX = 200
+
+# Pending edits awaiting a "which one?" choice, keyed by a short token that the
+# candidate buttons carry. Same in-memory, per-process caveat as _UNDO.
+_PENDING_EDITS: "OrderedDict[str, tuple]" = OrderedDict()
+_PENDING_MAX = 200
+
+# target word -> (table, column searched to find the entry)
+_EDIT_TARGETS = {
+    "task": ("tasks", "title"),
+    "expense": ("transactions", "note"),
+    "note": ("notes", "content"),
+}
+
+
+def _remember(store: "OrderedDict[str, tuple]", limit: int, token: str, value: tuple) -> None:
+    store[token] = value
+    store.move_to_end(token)
+    while len(store) > limit:
+        store.popitem(last=False)
+
+
+def _remember_undo(token: str, user_id: str, table: str, row: dict) -> None:
+    _remember(_UNDO, _UNDO_MAX, token, (user_id, table, row))
 
 # Totals and budgets are kept in one base currency. Foreign-currency entries are
 # tracked and reported separately rather than summed in (we have no FX rates, so
@@ -35,7 +66,7 @@ START_TEXT = (
     "coffee 60   /   salary 30000 in\n"
     "remind me to call the bank at 3pm\n"
     "what's on today?\n\n"
-    "Commands: /today /tasks /done /spent /budget /report /find /recurring "
+    "Commands: /today /tasks /done /week /spent /budget /report /find /recurring "
     "/export /help. Voice and receipt photos work too."
 )
 
@@ -45,13 +76,16 @@ HELP_TEXT = (
     "/today   what's on today\n"
     "/tasks   open tasks, with buttons to finish or delete\n"
     "/done <task>   mark a task done\n"
+    "/week   this week's totals by category\n"
     "/spent   this month's totals by category\n"
     "/budget   set or view monthly budgets (e.g. /budget food 3000)\n"
     "/report   spending vs last month, with a chart\n"
     "/find <text>   search notes, tasks, expenses\n"
     "/recurring   manage monthly recurring expenses\n"
     "/export   download your transactions as CSV\n\n"
-    "Set reminders by writing \"remind me to X at 3pm\". Log money with "
+    "Set reminders by writing \"remind me to X at 3pm\" (or \"every Monday 9am\" "
+    "for a repeating one). Change saved items in words: \"change coffee to 80\", "
+    "\"rename task X to Y\". Deleting anything shows an Undo button. Log money with "
     "\"taxi 80\" or by sending a receipt photo. Voice messages get transcribed."
 )
 
@@ -99,6 +133,8 @@ def handle_message(user_id: str, text: str) -> list[dict]:
         return _list_open_tasks(user_id)
     if text.startswith("/done"):
         return _handle_done(user_id, text[len("/done"):].strip())
+    if text.startswith("/week"):
+        return _week_summary(user_id)
     if text.startswith("/spent") or text.startswith("/expenses"):
         return _month_summary(user_id)
     if text.startswith("/budget"):
@@ -142,7 +178,9 @@ def handle_message(user_id: str, text: str) -> list[dict]:
         friendly = data["remind_at"]
         data["remind_at"] = clock.to_aware_iso(data["remind_at"])
         supabase_client.insert_reminder(user_id, data)
-        return [_reply(f"Reminder set for {friendly}: {data.get('text', '').strip()}")]
+        repeat = data.get("repeat")
+        suffix = f" (repeats {repeat})" if repeat in ("daily", "weekly", "monthly") else ""
+        return [_reply(f"Reminder set for {friendly}{suffix}: {data.get('text', '').strip()}")]
 
     if msg_type == "expense":
         if data.get("amount") in (None, ""):
@@ -150,6 +188,9 @@ def handle_message(user_id: str, text: str) -> list[dict]:
             row = supabase_client.insert_note(user_id, {"content": text})
             return [_reply(f"Noted: {text}", _delete_markup("notes", row.get("id")))]
         return record_expense(user_id, data)
+
+    if msg_type == "edit":
+        return _handle_edit(user_id, data)
 
     if msg_type == "query":
         rows = supabase_client.query(user_id, data.get("scope", "all"))
@@ -197,13 +238,134 @@ def handle_callback(user_id: str, data: str) -> dict:
         }
 
     if action == "del" and len(parts) == 3:
-        ok = supabase_client.delete_row(user_id, parts[1], parts[2])
-        return {
-            "answer": "Deleted" if ok else "Already gone",
-            "edit_text": "Deleted" if ok else None,
-        }
+        row = supabase_client.delete_row(user_id, parts[1], parts[2])
+        if not row:
+            return {"answer": "Already gone", "edit_text": None}
+        markup = None
+        if isinstance(row, dict) and row.get("id"):
+            _remember_undo(row["id"], user_id, parts[1], row)
+            markup = {"inline_keyboard": [[
+                {"text": "Undo", "callback_data": f"undo:{row['id']}"},
+            ]]}
+        return {"answer": "Deleted", "edit_text": "Deleted", "reply_markup": markup}
+
+    if action == "undo" and len(parts) == 2:
+        entry = _UNDO.pop(parts[1], None)
+        if not entry or entry[0] != user_id:
+            return {"answer": "Nothing to undo", "edit_text": None}
+        _, table, row = entry
+        _reinsert(user_id, table, row)
+        return {"answer": "Restored", "edit_text": "Restored: " + _undo_label(table, row)}
+
+    if action == "edit" and len(parts) == 3:
+        row_id, token = parts[1], parts[2]
+        entry = _PENDING_EDITS.get(token)
+        if not entry or entry[0] != user_id:
+            return {"answer": "That edit expired", "edit_text": None}
+        _, table, changes = entry
+        updated = supabase_client.update_row(user_id, table, row_id, changes)
+        if not updated:
+            return {"answer": "Nothing changed", "edit_text": None}
+        return {"answer": "Updated", "edit_text": "Updated: " + _describe_row(table, updated)}
 
     return {"answer": "Unknown action", "edit_text": None}
+
+
+def _handle_edit(user_id: str, data: dict) -> list[dict]:
+    """Apply a natural-language edit to an existing task / expense / note."""
+    target = (data.get("target") or "").lower()
+    if target not in _EDIT_TARGETS:
+        return [_reply("I can edit tasks, expenses, and notes.")]
+    changes = _clean_changes(target, data.get("changes") or {})
+    if not changes:
+        return [_reply('Tell me what to change, e.g. "change coffee to 80".')]
+    match = (data.get("match") or "").strip()
+    if not match:
+        return [_reply('Which one? Name it, e.g. "change the coffee expense to 80".')]
+
+    table, column = _EDIT_TARGETS[target]
+    matches = supabase_client.search(user_id, table, column, match, limit=6)
+    if not matches and table == "transactions":
+        # An expense might be identified by its category rather than its note.
+        matches = supabase_client.search(user_id, table, "category", match, limit=6)
+    if not matches:
+        return [_reply(f'Couldn\'t find a {target} matching "{match}".')]
+
+    if len(matches) == 1:
+        updated = supabase_client.update_row(user_id, table, matches[0]["id"], changes)
+        if not updated:
+            return [_reply("Nothing to change there.")]
+        return [_reply("Updated: " + _describe_row(table, updated), _row_markup(table, updated))]
+
+    # Ambiguous — stash the change and let the user pick the entry.
+    token = uuid.uuid4().hex[:8]
+    _remember(_PENDING_EDITS, _PENDING_MAX, token, (user_id, table, changes))
+    replies = [_reply(f"More than one {target} matches. Which one?")]
+    for m in matches:
+        replies.append(_reply(_describe_row(table, m), {
+            "inline_keyboard": [[
+                {"text": "Edit this", "callback_data": f"edit:{m['id']}:{token}"},
+            ]],
+        }))
+    return replies
+
+
+def _clean_changes(target: str, changes: dict) -> dict:
+    """Coerce/normalize the requested changes; drop empties."""
+    out: dict = {}
+    for key, value in changes.items():
+        if value in (None, ""):
+            continue
+        if key == "amount":
+            out["amount"] = _num(value)
+        elif key == "category" and target == "expense":
+            out["category"] = classifier._normalize_category("expense", value)
+        else:
+            out[key] = value
+    return out
+
+
+def _describe_row(table: str, row: dict) -> str:
+    if table == "tasks":
+        return _describe_task(row)
+    if table == "transactions":
+        return _describe_transaction(row)
+    if table == "notes":
+        return row.get("content", "")
+    if table == "schedule":
+        return _describe_schedule(row)
+    return str(row.get("id", ""))
+
+
+def _row_markup(table: str, row: dict) -> dict | None:
+    if table == "tasks":
+        return _task_markup(row.get("id"))
+    return _delete_markup(table, row.get("id"))
+
+
+def _reinsert(user_id: str, table: str, row: dict) -> None:
+    """Re-create a previously deleted row (used by Undo)."""
+    inserters = {
+        "notes": supabase_client.insert_note,
+        "schedule": supabase_client.insert_schedule,
+        "tasks": supabase_client.insert_task,
+        "transactions": supabase_client.insert_transaction,
+    }
+    insert = inserters.get(table)
+    if insert:
+        insert(user_id, row)
+
+
+def _undo_label(table: str, row: dict) -> str:
+    if table == "notes":
+        return row.get("content", "note")
+    if table == "tasks":
+        return _describe_task(row)
+    if table == "transactions":
+        return _describe_transaction(row)
+    if table == "schedule":
+        return _describe_schedule(row)
+    return "entry"
 
 
 def _list_open_tasks(user_id: str) -> list[dict]:
@@ -290,6 +452,29 @@ def _month_expenses(user_id: str):
     counting only base-currency entries."""
     agg = _aggregate(_month_rows(user_id))
     return agg["income"], agg["expense"], agg["by_category"]
+
+
+def _week_summary(user_id: str) -> list[dict]:
+    today = clock.today()
+    monday = today - timedelta(days=today.weekday())
+    agg = _aggregate(supabase_client.list_transactions(user_id, monday.isoformat()))
+    income, expense, by_category = agg["income"], agg["expense"], agg["by_category"]
+    if not income and not expense and not agg["foreign"]:
+        return [_reply("Nothing logged this week yet.")]
+
+    lines = [
+        f"This week (since {monday:%b %d})",
+        f"Spent: {_fmt(expense)}",
+        f"Income: {_fmt(income)}",
+        f"Net: {_fmt(income - expense)}",
+    ]
+    if by_category:
+        lines.append("")
+        lines.append("By category:")
+        for cat, amt in sorted(by_category.items(), key=lambda kv: -kv[1])[:5]:
+            lines.append(f"  {cat} {_fmt(amt)}")
+    lines += _foreign_lines(agg["foreign"])
+    return [_reply("\n".join(lines))]
 
 
 def _month_summary(user_id: str) -> list[dict]:

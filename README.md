@@ -14,6 +14,7 @@ Send it a message and it figures out what you meant:
 | `Class on Monday 09:00–11:00 in room 301` | saves a **schedule** entry |
 | `Submit the OS assignment by Friday` | saves a **task** |
 | `Coffee 60` / `Salary 30000 in` | logs an **expense / income** |
+| `Change coffee to 80` / `Rename task X to Y` | **edits** an existing entry |
 | `What's on today?` / `How much did I spend?` | **queries** your data and answers |
 
 It also reads **photos of receipts** (snap a bill → it logs the expense),
@@ -25,6 +26,7 @@ delete), and can send a **morning digest** of your day.
 - `/today` — what's on today
 - `/tasks` — your open tasks, each with ✅ / 🗑 buttons
 - `/done <task>` — mark a task complete (or `/done` to pick from a list)
+- `/week` — this week's income, spending, and top categories
 - `/spent` — this month's income, spending, and top categories
 - `/budget` — set or view monthly budgets (e.g. `/budget food 3000`,
   `/budget 20000` for an overall limit, `/budget food off` to remove)
@@ -34,10 +36,14 @@ delete), and can send a **morning digest** of your day.
 - `/export` — download all your transactions as a CSV file
 - `/help` — usage
 
-Set a reminder by writing `remind me to call the bank at 3pm`. After each
-expense, if a relevant budget exists, the bot appends a progress line (e.g.
-`food: 3,500 / 3,000 — over by 500`). Tasks have a **+1 day** button to
-reschedule.
+Set a reminder by writing `remind me to call the bank at 3pm`, or a **repeating**
+one with `remind me to stretch every day` / `every Monday 9am` (daily, weekly,
+monthly). After each expense, if a relevant budget exists, the bot appends a
+progress line (e.g. `food: 3,500 / 3,000 — over by 500`). Tasks have a **+1 day**
+button to reschedule. Deleting any item leaves an **Undo** button to restore it.
+Edit a saved entry in plain words — `change coffee to 80`, `rename the report task
+to slides`, `set the OS assignment due date to Friday`; if more than one entry
+matches, the bot asks which one.
 
 Times use the `TIMEZONE` setting (default `Asia/Bangkok`). Totals and budgets are
 kept in one `BASE_CURRENCY` (default `THB`); expenses logged in another currency
@@ -185,6 +191,8 @@ Two more cron endpoints (same `CRON_SECRET`):
 
 - `POST /cron/reminders` — delivers timed reminders that are due. Call it
   frequently (every 1–5 minutes) so reminders fire close to their time.
+  Repeating reminders (daily/weekly/monthly) roll forward to their next
+  occurrence; one-offs are retired after firing.
 - `POST /cron/recurring` — posts recurring expenses whose day-of-month is today.
   Call it once a day.
 
@@ -219,7 +227,7 @@ Each message is sent to Claude with a system prompt asking it to return JSON:
 
 ```json
 {
-  "type": "note" | "schedule" | "task" | "expense" | "query",
+  "type": "note" | "schedule" | "task" | "expense" | "reminder" | "edit" | "query",
   "data": { ...fields for that type... }
 }
 ```
@@ -231,11 +239,15 @@ Examples:
 {"type": "schedule", "data": {"title": "Class", "day_of_week": "Monday", "start_time": "09:00", "end_time": "11:00", "location": "room 301"}}
 {"type": "task", "data": {"title": "Submit OS assignment", "due_date": "2026-07-03", "priority": "normal"}}
 {"type": "expense", "data": {"kind": "expense", "amount": 60, "category": "food", "note": "coffee"}}
+{"type": "reminder", "data": {"text": "call the bank", "remind_at": "2026-07-03 15:00", "repeat": null}}
+{"type": "edit", "data": {"target": "expense", "match": "coffee", "changes": {"amount": 80}}}
 {"type": "query", "data": {"scope": "expenses"}}
 ```
 
-`note` / `schedule` / `task` / `expense` get inserted into Supabase. `query`
-reads the relevant rows back and asks Claude to format a friendly reply.
+`note` / `schedule` / `task` / `expense` get inserted into Supabase; `reminder`
+is queued for the reminders cron. `edit` finds the matching entry and patches it
+(asking which one if several match). `query` reads the relevant rows back and asks
+Claude to format a friendly reply.
 
 Expenses are filed into a fixed set of categories, so `/spent` totals stay
 consistent (anything unrecognized snaps to `other`):

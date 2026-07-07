@@ -38,6 +38,7 @@ _BOT_COMMANDS = [
     {"command": "today", "description": "What's on today"},
     {"command": "tasks", "description": "Show my open tasks"},
     {"command": "done", "description": "Mark a task complete"},
+    {"command": "week", "description": "This week's spending summary"},
     {"command": "spent", "description": "This month's spending summary"},
     {"command": "budget", "description": "Set or view monthly budgets"},
     {"command": "report", "description": "Spending report with a chart"},
@@ -262,7 +263,9 @@ async def _handle_callback(cb: dict) -> None:
     await telegram_client.answer_callback_query(cb_id, result.get("answer"))
     if result.get("edit_text") and chat_id and message_id:
         try:
-            await telegram_client.edit_message_text(chat_id, message_id, result["edit_text"])
+            await telegram_client.edit_message_text(
+                chat_id, message_id, result["edit_text"], result.get("reply_markup")
+            )
         except Exception as exc:  # noqa: BLE001
             print(f"[callback] edit failed: {exc}")
 
@@ -320,7 +323,13 @@ async def fire_reminders(
             if chat_id:
                 await telegram_client.send_message(chat_id, "Reminder: " + r.get("text", ""))
                 sent += 1
-            await run_in_threadpool(supabase_client.mark_reminder_sent, r["id"])
+            # Repeating reminders roll forward to their next occurrence; one-offs
+            # are marked sent so they don't fire again.
+            next_at = clock.next_occurrence(r.get("remind_at"), r.get("repeat"))
+            if next_at:
+                await run_in_threadpool(supabase_client.reschedule_reminder, r["id"], next_at)
+            else:
+                await run_in_threadpool(supabase_client.mark_reminder_sent, r["id"])
         except Exception as exc:  # noqa: BLE001
             print(f"[reminders] failed for {r.get('id')}: {exc}")
     return {"ok": True, "sent": sent}

@@ -109,7 +109,16 @@ Types and their data fields:
 
 - "reminder" the user wants to be pinged at a specific time.
              data: {{"text": string,                    // what to remind about
-                     "remind_at": "YYYY-MM-DD HH:MM"}}   // 24h, absolute
+                     "remind_at": "YYYY-MM-DD HH:MM",    // 24h, absolute; next occurrence
+                     "repeat": "daily"|"weekly"|"monthly"|null}}
+
+- "edit"     change an entry the user already saved.
+             data: {{"target": "task"|"expense"|"note",
+                     "match": string,      // words identifying which entry to change
+                     "changes": {{ ... }}}} // ONLY the fields being changed
+             task changes:    title, due_date ("YYYY-MM-DD"), priority.
+             expense changes: amount, category, note, currency, occurred_on.
+             note changes:    content.
 
 - "query"    the user is asking about their stored data.
              data: {{"scope": "today"|"week"|"tasks"|"schedule"|"notes"|"expenses"|"all"}}
@@ -120,6 +129,9 @@ Rules:
 - A "reminder" has an explicit time to ping the user ("remind me to X at/in ...").
   A "task" is a to-do, possibly with a due date but no ping time. If the message
   asks to be reminded at a time, it is a "reminder".
+- A repeating reminder ("every day", "every Monday", "each month") sets "repeat"
+  and "remind_at" to the FIRST/next occurrence. "every Monday 9am" → remind_at is
+  the next Monday 09:00, repeat "weekly". A one-off reminder has repeat null.
 - Times are 24-hour "HH:MM". Use null for anything not stated.
 - Default task priority is "normal".
 - For "expense": a bare amount with a thing bought (e.g. "coffee 60", "lunch 120
@@ -129,6 +141,10 @@ Rules:
 - For an expense "category", choose the single best fit from this list:
   {expense_categories}. Use "other" if nothing fits. For income, use one of:
   {income_categories}.
+- An "edit" changes something already saved and uses a change verb ("change",
+  "update", "rename", "set", "move", "make it"). "coffee 80" logs a NEW expense;
+  "change coffee to 80" edits the existing one. Put the words identifying the
+  entry in "match" and only the changed fields in "changes".
 - Questions about spending/budget/how much was spent are "query" with scope
   "expenses".
 - Match the user's language in any text you echo back.
@@ -161,6 +177,13 @@ def classify(message: str) -> dict:
     if result.get("type") == "expense":
         data = result.get("data") or {}
         data["category"] = _normalize_category(data.get("kind", "expense"), data.get("category"))
+        result["data"] = data
+    elif result.get("type") == "edit":
+        data = result.get("data") or {}
+        changes = data.get("changes") or {}
+        if data.get("target") == "expense" and changes.get("category"):
+            changes["category"] = _normalize_category("expense", changes["category"])
+        data["changes"] = changes
         result["data"] = data
     return result
 

@@ -137,8 +137,18 @@ def search(user_id: str, table: str, column: str, q: str, limit: int = 10) -> li
 # --- reminders -------------------------------------------------------------
 
 def insert_reminder(user_id: str, data: dict) -> dict:
-    row = {"user_id": user_id, "text": data.get("text", ""), "remind_at": data.get("remind_at")}
+    row = {
+        "user_id": user_id,
+        "text": data.get("text", ""),
+        "remind_at": data.get("remind_at"),
+        "repeat": data.get("repeat"),
+    }
     return _first(_db().table("reminders").insert(row).execute().data)
+
+
+def reschedule_reminder(reminder_id: str, next_iso: str) -> None:
+    """Push a repeating reminder's next fire time forward (stays unsent)."""
+    _db().table("reminders").update({"remind_at": next_iso}).eq("id", reminder_id).execute()
 
 
 def due_reminders(before_iso: str, limit: int = 100) -> list[dict]:
@@ -231,10 +241,44 @@ def complete_task(user_id: str, task_id: str) -> dict | None:
     return res.data[0] if res.data else None
 
 
-def delete_row(user_id: str, table: str, row_id: str) -> bool:
-    """Delete a row the user owns from one of the content tables."""
+# Columns a user is allowed to change per table (via natural-language edits).
+_EDITABLE_COLUMNS = {
+    "tasks": {"title", "due_date", "priority"},
+    "transactions": {"amount", "category", "note", "currency", "occurred_on"},
+    "notes": {"content"},
+    "schedule": {"title", "day_of_week", "start_time", "end_time", "location", "notes"},
+}
+
+
+def update_row(user_id: str, table: str, row_id: str, changes: dict) -> dict | None:
+    """Patch whitelisted columns of a row the user owns; return the updated row.
+
+    Only columns in ``_EDITABLE_COLUMNS[table]`` are applied, so a bad ``changes``
+    dict can't touch arbitrary fields. Returns None if nothing valid to update."""
+    allowed = _EDITABLE_COLUMNS.get(table)
+    if not allowed:
+        return None
+    patch = {k: v for k, v in (changes or {}).items() if k in allowed}
+    if not patch:
+        return None
+    res = (
+        _db()
+        .table(table)
+        .update(patch)
+        .eq("user_id", user_id)
+        .eq("id", row_id)
+        .execute()
+    )
+    return res.data[0] if res.data else None
+
+
+def delete_row(user_id: str, table: str, row_id: str) -> dict | None:
+    """Delete a row the user owns from one of the content tables.
+
+    Returns the deleted row (so it can be restored via Undo), or None if the
+    table is unknown or nothing matched."""
     if table not in ("notes", "schedule", "tasks", "transactions"):
-        return False
+        return None
     res = (
         _db()
         .table(table)
@@ -243,7 +287,7 @@ def delete_row(user_id: str, table: str, row_id: str) -> bool:
         .eq("id", row_id)
         .execute()
     )
-    return bool(res.data)
+    return res.data[0] if res.data else None
 
 
 # --- budgets ---------------------------------------------------------------
