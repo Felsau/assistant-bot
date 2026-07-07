@@ -39,7 +39,10 @@ expense, if a relevant budget exists, the bot appends a progress line (e.g.
 `food: 3,500 / 3,000 — over by 500`). Tasks have a **+1 day** button to
 reschedule.
 
-Times use the `TIMEZONE` setting (default `Asia/Bangkok`).
+Times use the `TIMEZONE` setting (default `Asia/Bangkok`). Totals and budgets are
+kept in one `BASE_CURRENCY` (default `THB`); expenses logged in another currency
+are listed separately rather than summed in, since there's no exchange-rate
+conversion.
 
 These register themselves as the bot's command menu on startup.
 

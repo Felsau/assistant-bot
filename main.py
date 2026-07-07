@@ -8,9 +8,11 @@ Flow:
 from __future__ import annotations
 
 import os
+from collections import deque
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi.concurrency import run_in_threadpool
 
 load_dotenv()
 
@@ -43,6 +45,27 @@ _BOT_COMMANDS = [
     {"command": "recurring", "description": "Manage recurring expenses"},
     {"command": "export", "description": "Download your transactions as CSV"},
 ]
+
+
+# Telegram re-delivers an update if the webhook is slow to answer. Remember the
+# recent update_ids we've handled so a redelivery can't double-log money. This
+# is per-process (fine for a single free-tier instance); scale out via a shared
+# store if you ever run multiple workers.
+_SEEN_UPDATES: deque[int] = deque(maxlen=1000)
+_SEEN_SET: set[int] = set()
+
+
+def _already_processed(update_id) -> bool:
+    """Record ``update_id`` and report whether it was already seen."""
+    if update_id is None:
+        return False
+    if update_id in _SEEN_SET:
+        return True
+    if len(_SEEN_UPDATES) == _SEEN_UPDATES.maxlen:
+        _SEEN_SET.discard(_SEEN_UPDATES[0])
+    _SEEN_UPDATES.append(update_id)
+    _SEEN_SET.add(update_id)
+    return False
 
 
 def _is_allowed(user_id: str) -> bool:
@@ -99,6 +122,10 @@ async def webhook(
 
     update = await request.json()
 
+    # Ignore redeliveries of an update we've already handled.
+    if _already_processed(update.get("update_id")):
+        return {"ok": True}
+
     if "callback_query" in update:
         await _handle_callback(update["callback_query"])
         return {"ok": True}
@@ -115,7 +142,7 @@ async def webhook(
         return {"ok": True}
 
     try:
-        supabase_client.upsert_user(user_id, chat_id)
+        await run_in_threadpool(supabase_client.upsert_user, user_id, chat_id)
     except Exception as exc:  # noqa: BLE001
         print(f"[webhook] upsert_user failed: {exc}")
 
@@ -154,9 +181,10 @@ async def webhook(
         return {"ok": True}
 
     try:
-        replies = handlers.handle_message(user_id, text)
+        replies = await run_in_threadpool(handlers.handle_message, user_id, text)
     except Exception as exc:  # noqa: BLE001 — never 500 back to Telegram
-        replies = [{"text": f"⚠️ Sorry, something went wrong: {exc}", "reply_markup": None}]
+        print(f"[webhook] handle_message failed: {exc}")
+        replies = [{"text": "Sorry, something went wrong. Try again.", "reply_markup": None}]
 
     for r in replies:
         await telegram_client.send_message(chat_id, r["text"], r.get("reply_markup"))
@@ -167,7 +195,7 @@ async def _handle_receipt(chat_id: int, user_id: str, file_id: str) -> None:
     """Download a photo, read it as a receipt, and log the expense."""
     try:
         image = await telegram_client.download_file(file_id)
-        data = classifier.extract_receipt(image)
+        data = await run_in_threadpool(classifier.extract_receipt, image)
     except Exception as exc:  # noqa: BLE001
         print(f"[receipt] failed: {exc}")
         await telegram_client.send_message(chat_id, "Couldn't read that image. Type the amount instead.")
@@ -179,16 +207,18 @@ async def _handle_receipt(chat_id: int, user_id: str, file_id: str) -> None:
         )
         return
 
-    replies = handlers.record_receipt(user_id, data)
+    replies = await run_in_threadpool(handlers.record_receipt, user_id, data)
     for r in replies:
         await telegram_client.send_message(chat_id, r["text"], r.get("reply_markup"))
 
 
 async def _handle_report(chat_id: int, user_id: str) -> None:
     """Send a spending report plus a category bar chart."""
-    text, by_category = handlers.report_text(user_id)
+    text, by_category = await run_in_threadpool(handlers.report_text, user_id)
     try:
-        image = report.render_category_chart(by_category, text.splitlines()[0])
+        image = await run_in_threadpool(
+            report.render_category_chart, by_category, text.splitlines()[0]
+        )
     except Exception as exc:  # noqa: BLE001 — chart is a nice-to-have
         print(f"[report] chart failed: {exc}")
         image = None
@@ -200,11 +230,11 @@ async def _handle_report(chat_id: int, user_id: str) -> None:
 
 async def _handle_export(chat_id: int, user_id: str) -> None:
     """Export all of the user's transactions as a CSV file."""
-    rows = supabase_client.list_transactions(user_id, limit=10000)
+    rows = await run_in_threadpool(supabase_client.list_transactions, user_id, limit=10000)
     if not rows:
         await telegram_client.send_message(chat_id, "Nothing to export yet.")
         return
-    csv_bytes = handlers.build_transactions_csv(rows)
+    csv_bytes = await run_in_threadpool(handlers.build_transactions_csv, rows)
     await telegram_client.send_document(
         chat_id, "transactions.csv", csv_bytes, caption="Your transactions"
     )
@@ -223,7 +253,7 @@ async def _handle_callback(cb: dict) -> None:
         return
 
     try:
-        result = handlers.handle_callback(user_id, data)
+        result = await run_in_threadpool(handlers.handle_callback, user_id, data)
     except Exception as exc:  # noqa: BLE001
         print(f"[callback] failed: {exc}")
         await telegram_client.answer_callback_query(cb_id, "Something went wrong")
@@ -250,16 +280,17 @@ async def daily_digest(
     if not _CRON_SECRET or provided != _CRON_SECRET:
         raise HTTPException(status_code=403, detail="forbidden")
 
-    users = supabase_client.list_users()
+    users = await run_in_threadpool(supabase_client.list_users)
     sent = 0
     for u in users:
         try:
-            rows = supabase_client.query(u["user_id"], "today")
-            text = classifier.format_query_reply(
+            rows = await run_in_threadpool(supabase_client.query, u["user_id"], "today")
+            text = await run_in_threadpool(
+                classifier.format_query_reply,
                 "Summarize what's on for today from this data. If nothing, say the day is clear.",
                 rows,
             )
-            warn = handlers.budget_warnings(u["user_id"])
+            warn = await run_in_threadpool(handlers.budget_warnings, u["user_id"])
             if warn:
                 text += "\n\n" + warn
             await telegram_client.send_message(u["chat_id"], text)
@@ -279,8 +310,9 @@ async def fire_reminders(
     if not _CRON_SECRET or (x_cron_secret or secret) != _CRON_SECRET:
         raise HTTPException(status_code=403, detail="forbidden")
 
-    chat_of = {u["user_id"]: u["chat_id"] for u in supabase_client.list_users()}
-    due = supabase_client.due_reminders(clock.now().isoformat())
+    users = await run_in_threadpool(supabase_client.list_users)
+    chat_of = {u["user_id"]: u["chat_id"] for u in users}
+    due = await run_in_threadpool(supabase_client.due_reminders, clock.now().isoformat())
     sent = 0
     for r in due:
         chat_id = chat_of.get(r["user_id"])
@@ -288,7 +320,7 @@ async def fire_reminders(
             if chat_id:
                 await telegram_client.send_message(chat_id, "Reminder: " + r.get("text", ""))
                 sent += 1
-            supabase_client.mark_reminder_sent(r["id"])
+            await run_in_threadpool(supabase_client.mark_reminder_sent, r["id"])
         except Exception as exc:  # noqa: BLE001
             print(f"[reminders] failed for {r.get('id')}: {exc}")
     return {"ok": True, "sent": sent}
@@ -305,14 +337,15 @@ async def post_recurring(
 
     today = clock.today()
     posted = 0
-    for r in supabase_client.all_recurring():
+    recurring = await run_in_threadpool(supabase_client.all_recurring)
+    for r in recurring:
         if int(r.get("day_of_month", 1)) != today.day:
             continue
         last = str(r.get("last_posted") or "")[:7]
         if last == today.strftime("%Y-%m"):
             continue  # already posted this month
         try:
-            supabase_client.insert_transaction(r["user_id"], {
+            await run_in_threadpool(supabase_client.insert_transaction, r["user_id"], {
                 "kind": r.get("kind", "expense"),
                 "amount": r.get("amount"),
                 "currency": r.get("currency"),
@@ -320,7 +353,7 @@ async def post_recurring(
                 "note": r.get("note"),
                 "occurred_on": today.isoformat(),
             })
-            supabase_client.mark_recurring_posted(r["id"], today.isoformat())
+            await run_in_threadpool(supabase_client.mark_recurring_posted, r["id"], today.isoformat())
             posted += 1
         except Exception as exc:  # noqa: BLE001
             print(f"[recurring] failed for {r.get('id')}: {exc}")

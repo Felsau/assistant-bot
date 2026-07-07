@@ -8,9 +8,29 @@ import httpx
 
 _API_BASE = "https://api.telegram.org"
 
+# Telegram rejects messages longer than 4096 characters; we split on newlines.
+_MAX_MESSAGE_LEN = 4096
+
 
 def _token() -> str:
     return os.environ["TELEGRAM_BOT_TOKEN"]
+
+
+def _split_message(text: str, limit: int = _MAX_MESSAGE_LEN) -> list[str]:
+    """Split text into <=limit-char chunks, preferring newline boundaries."""
+    if len(text) <= limit:
+        return [text]
+    chunks: list[str] = []
+    remaining = text
+    while len(remaining) > limit:
+        cut = remaining.rfind("\n", 0, limit)
+        if cut <= 0:  # no newline to break on — hard-split
+            cut = limit
+        chunks.append(remaining[:cut])
+        remaining = remaining[cut:].lstrip("\n") if cut < limit else remaining[cut:]
+    if remaining:
+        chunks.append(remaining)
+    return chunks
 
 
 async def _post(method: str, payload: dict) -> dict:
@@ -24,11 +44,17 @@ async def _post(method: str, payload: dict) -> dict:
 async def send_message(
     chat_id: int | str, text: str, reply_markup: dict | None = None
 ) -> None:
-    """Send a text message, optionally with an inline keyboard."""
-    payload: dict = {"chat_id": chat_id, "text": text}
-    if reply_markup is not None:
-        payload["reply_markup"] = reply_markup
-    await _post("sendMessage", payload)
+    """Send a text message, optionally with an inline keyboard.
+
+    Long text is split into several messages to stay under Telegram's 4096-char
+    limit; the keyboard (if any) is attached to the final chunk only."""
+    chunks = _split_message(text or "") or [""]
+    last = len(chunks) - 1
+    for i, chunk in enumerate(chunks):
+        payload: dict = {"chat_id": chat_id, "text": chunk}
+        if reply_markup is not None and i == last:
+            payload["reply_markup"] = reply_markup
+        await _post("sendMessage", payload)
 
 
 async def edit_message_text(

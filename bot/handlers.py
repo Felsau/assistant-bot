@@ -13,11 +13,18 @@ from __future__ import annotations
 
 import csv
 import io
+import os
 from datetime import datetime, timedelta
 
 from ai import classifier
 from bot import clock
 from db import supabase_client
+
+# Totals and budgets are kept in one base currency. Foreign-currency entries are
+# tracked and reported separately rather than summed in (we have no FX rates, so
+# adding 40 USD to a THB total would be wrong). Entries with no currency are
+# assumed to be in the base currency.
+BASE_CURRENCY = os.environ.get("BASE_CURRENCY", "THB").upper()
 
 START_TEXT = (
     "I sort what you send into notes, schedule, tasks, and expenses, and "
@@ -130,8 +137,12 @@ def handle_message(user_id: str, text: str) -> list[dict]:
         if not data.get("remind_at"):
             row = supabase_client.insert_note(user_id, {"content": text})
             return [_reply(f"Noted: {text}", _delete_markup("notes", row.get("id")))]
+        # Echo the friendly local time, but store an offset-stamped instant so
+        # the timestamptz column doesn't shift it to UTC.
+        friendly = data["remind_at"]
+        data["remind_at"] = clock.to_aware_iso(data["remind_at"])
         supabase_client.insert_reminder(user_id, data)
-        return [_reply(f"Reminder set for {data['remind_at']}: {data.get('text', '').strip()}")]
+        return [_reply(f"Reminder set for {friendly}: {data.get('text', '').strip()}")]
 
     if msg_type == "expense":
         if data.get("amount") in (None, ""):
@@ -229,23 +240,62 @@ def _handle_done(user_id: str, arg: str) -> list[dict]:
     return replies
 
 
-def _month_expenses(user_id: str):
-    """Return (income, expense_total, {category: spent}) for the current month."""
-    start = clock.today().replace(day=1)
-    rows = supabase_client.list_transactions(user_id, start.isoformat())
-    income = sum(_num(r.get("amount")) for r in rows if r.get("kind") == "income")
-    total = sum(_num(r.get("amount")) for r in rows if r.get("kind", "expense") != "income")
+def _is_base_currency(row: dict) -> bool:
+    return (row.get("currency") or BASE_CURRENCY).upper() == BASE_CURRENCY
+
+
+def _aggregate(rows: list[dict]) -> dict:
+    """Aggregate transactions in the base currency for the given rows.
+
+    Returns ``{"income", "expense", "by_category", "foreign"}`` where ``foreign``
+    maps each non-base currency to its expense total (surfaced separately, never
+    mixed into the base-currency numbers)."""
+    income = expense = 0.0
     by_category: dict[str, float] = {}
+    foreign: dict[str, float] = {}
     for r in rows:
-        if r.get("kind", "expense") != "income":
+        amount = _num(r.get("amount"))
+        is_income = r.get("kind") == "income"
+        if not _is_base_currency(r):
+            if not is_income:
+                cur = (r.get("currency") or "").upper()
+                foreign[cur] = foreign.get(cur, 0) + amount
+            continue
+        if is_income:
+            income += amount
+        else:
+            expense += amount
             cat = r.get("category") or "other"
-            by_category[cat] = by_category.get(cat, 0) + _num(r.get("amount"))
-    return income, total, by_category
+            by_category[cat] = by_category.get(cat, 0) + amount
+    return {"income": income, "expense": expense, "by_category": by_category, "foreign": foreign}
+
+
+def _month_rows(user_id: str) -> list[dict]:
+    start = clock.today().replace(day=1)
+    return supabase_client.list_transactions(user_id, start.isoformat())
+
+
+def _foreign_lines(foreign: dict[str, float]) -> list[str]:
+    """Render a "not included" note for any foreign-currency spending."""
+    if not foreign:
+        return []
+    lines = ["", "Other currencies (not included):"]
+    for cur, amt in sorted(foreign.items()):
+        lines.append(f"  {cur} {_fmt(amt)}")
+    return lines
+
+
+def _month_expenses(user_id: str):
+    """Return (income, expense_total, {category: spent}) for the current month,
+    counting only base-currency entries."""
+    agg = _aggregate(_month_rows(user_id))
+    return agg["income"], agg["expense"], agg["by_category"]
 
 
 def _month_summary(user_id: str) -> list[dict]:
-    income, expense, by_category = _month_expenses(user_id)
-    if not income and not expense:
+    agg = _aggregate(_month_rows(user_id))
+    income, expense, by_category = agg["income"], agg["expense"], agg["by_category"]
+    if not income and not expense and not agg["foreign"]:
         return [_reply("Nothing logged this month yet.")]
 
     lines = [
@@ -259,6 +309,7 @@ def _month_summary(user_id: str) -> list[dict]:
         lines.append("By category:")
         for cat, amt in sorted(by_category.items(), key=lambda kv: -kv[1])[:5]:
             lines.append(f"  {cat} {_fmt(amt)}")
+    lines += _foreign_lines(agg["foreign"])
     return [_reply("\n".join(lines))]
 
 
@@ -420,14 +471,10 @@ def report_text(user_id: str):
         user_id, prev_start.isoformat(), prev_end.isoformat()
     )
 
-    cur_exp = sum(_num(r.get("amount")) for r in cur if r.get("kind", "expense") != "income")
-    prev_exp = sum(_num(r.get("amount")) for r in prev if r.get("kind", "expense") != "income")
-
-    by_category: dict[str, float] = {}
-    for r in cur:
-        if r.get("kind", "expense") != "income":
-            cat = r.get("category") or "other"
-            by_category[cat] = by_category.get(cat, 0) + _num(r.get("amount"))
+    cur_agg = _aggregate(cur)
+    cur_exp = cur_agg["expense"]
+    prev_exp = _aggregate(prev)["expense"]
+    by_category = cur_agg["by_category"]
 
     delta = cur_exp - prev_exp
     if prev_exp:
@@ -445,6 +492,7 @@ def report_text(user_id: str):
         lines.append("By category:")
         for cat, amt in sorted(by_category.items(), key=lambda kv: -kv[1]):
             lines.append(f"  {cat} {_fmt(amt)}")
+    lines += _foreign_lines(cur_agg["foreign"])
     return "\n".join(lines), by_category
 
 
