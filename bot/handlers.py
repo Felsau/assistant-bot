@@ -262,6 +262,9 @@ def handle_callback(user_id: str, data: str) -> dict:
         entry = _PENDING_EDITS.get(token)
         if not entry or entry[0] != user_id:
             return {"answer": "That edit expired", "edit_text": None}
+        # Pop it: the token is shared by every candidate's button, so leaving it
+        # live would let a second tap re-apply the same change to another row.
+        del _PENDING_EDITS[token]
         _, table, changes = entry
         updated = supabase_client.update_row(user_id, table, row_id, changes)
         if not updated:
@@ -432,9 +435,14 @@ def _aggregate(rows: list[dict]) -> dict:
     return {"income": income, "expense": expense, "by_category": by_category, "foreign": foreign}
 
 
+# The default query limit (200) is fine for /export, but an active user can
+# log more than 200 transactions in a month/week — summaries need the full set.
+_SUMMARY_LIMIT = 5000
+
+
 def _month_rows(user_id: str) -> list[dict]:
     start = clock.today().replace(day=1)
-    return supabase_client.list_transactions(user_id, start.isoformat())
+    return supabase_client.list_transactions(user_id, start.isoformat(), limit=_SUMMARY_LIMIT)
 
 
 def _foreign_lines(foreign: dict[str, float]) -> list[str]:
@@ -457,7 +465,7 @@ def _month_expenses(user_id: str):
 def _week_summary(user_id: str) -> list[dict]:
     today = clock.today()
     monday = today - timedelta(days=today.weekday())
-    agg = _aggregate(supabase_client.list_transactions(user_id, monday.isoformat()))
+    agg = _aggregate(supabase_client.list_transactions(user_id, monday.isoformat(), limit=_SUMMARY_LIMIT))
     income, expense, by_category = agg["income"], agg["expense"], agg["by_category"]
     if not income and not expense and not agg["foreign"]:
         return [_reply("Nothing logged this week yet.")]
@@ -651,9 +659,9 @@ def report_text(user_id: str):
     prev_end = cur_start - timedelta(days=1)
     prev_start = prev_end.replace(day=1)
 
-    cur = supabase_client.list_transactions(user_id, cur_start.isoformat())
+    cur = supabase_client.list_transactions(user_id, cur_start.isoformat(), limit=_SUMMARY_LIMIT)
     prev = supabase_client.list_transactions(
-        user_id, prev_start.isoformat(), prev_end.isoformat()
+        user_id, prev_start.isoformat(), prev_end.isoformat(), limit=_SUMMARY_LIMIT
     )
 
     cur_agg = _aggregate(cur)
@@ -731,6 +739,16 @@ def _parse_date(value):
         return None
 
 
+# A note/category starting with one of these opens as a live formula in
+# Excel/Sheets when the CSV is opened (CSV formula injection). Prefix with an
+# apostrophe to force it to be read as plain text.
+_CSV_FORMULA_PREFIXES = ("=", "+", "-", "@")
+
+
+def _csv_safe(value: str) -> str:
+    return "'" + value if value.startswith(_CSV_FORMULA_PREFIXES) else value
+
+
 def build_transactions_csv(rows: list[dict]) -> bytes:
     """Serialize transactions to CSV bytes (UTF-8 BOM, Excel-friendly)."""
     buf = io.StringIO()
@@ -742,8 +760,8 @@ def build_transactions_csv(rows: list[dict]) -> bytes:
             r.get("kind", "expense") or "",
             r.get("amount", "") if r.get("amount") is not None else "",
             r.get("currency", "") or "",
-            r.get("category", "") or "",
-            r.get("note", "") or "",
+            _csv_safe(r.get("category", "") or ""),
+            _csv_safe(r.get("note", "") or ""),
         ])
     return buf.getvalue().encode("utf-8-sig")
 

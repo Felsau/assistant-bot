@@ -59,7 +59,7 @@ def test_week_summary(monkeypatch):
         {"kind": "expense", "amount": 40, "category": "transport"},
         {"kind": "income", "amount": 500},
     ]
-    monkeypatch.setattr(supabase_client, "list_transactions", lambda uid, start: rows)
+    monkeypatch.setattr(supabase_client, "list_transactions", lambda uid, start, **kw: rows)
     text = handlers.handle_message("u1", "/week")[0]["text"]
     assert "This week" in text
     assert "Spent: 100" in text
@@ -68,7 +68,7 @@ def test_week_summary(monkeypatch):
 
 
 def test_week_summary_empty(monkeypatch):
-    monkeypatch.setattr(supabase_client, "list_transactions", lambda uid, start: [])
+    monkeypatch.setattr(supabase_client, "list_transactions", lambda uid, start, **kw: [])
     text = handlers.handle_message("u1", "/week")[0]["text"]
     assert "Nothing logged this week" in text
 

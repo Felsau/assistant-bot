@@ -59,7 +59,7 @@ def test_spent_summary(monkeypatch):
         {"kind": "expense", "amount": 80, "category": "transport"},
         {"kind": "income", "amount": 1000},
     ]
-    monkeypatch.setattr(supabase_client, "list_transactions", lambda uid, start: rows)
+    monkeypatch.setattr(supabase_client, "list_transactions", lambda uid, start, **kw: rows)
 
     replies = handlers.handle_message("u1", "/spent")
     text = replies[0]["text"]

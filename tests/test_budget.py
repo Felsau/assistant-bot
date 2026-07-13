@@ -32,7 +32,7 @@ def test_remove_budget(monkeypatch):
 def test_budget_status_shows_progress(monkeypatch):
     monkeypatch.setattr(supabase_client, "get_budgets",
                         lambda uid: {"total": 20000, "food": 3000})
-    monkeypatch.setattr(supabase_client, "list_transactions", lambda uid, start: [
+    monkeypatch.setattr(supabase_client, "list_transactions", lambda uid, start, **kw: [
         {"kind": "expense", "amount": 3500, "category": "food"},
         {"kind": "expense", "amount": 1000, "category": "transport"},
     ])
@@ -44,7 +44,7 @@ def test_budget_status_shows_progress(monkeypatch):
 def test_expense_appends_budget_alert(monkeypatch):
     monkeypatch.setattr(supabase_client, "insert_transaction", lambda uid, d: {"id": "x1"})
     monkeypatch.setattr(supabase_client, "get_budgets", lambda uid: {"food": 100})
-    monkeypatch.setattr(supabase_client, "list_transactions", lambda uid, start: [
+    monkeypatch.setattr(supabase_client, "list_transactions", lambda uid, start, **kw: [
         {"kind": "expense", "amount": 120, "category": "food"},
     ])
     text = handlers.record_expense("u1", {"kind": "expense", "amount": 120, "category": "food"})[0]["text"]

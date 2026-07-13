@@ -131,7 +131,10 @@ async def webhook(
         await _handle_callback(update["callback_query"])
         return {"ok": True}
 
-    message = update.get("message") or update.get("edited_message")
+    # Edited messages aren't re-processed: re-running classification on an edit
+    # would insert a second expense/task/etc. rather than updating the first.
+    # (Use "change coffee to 80" to edit an already-saved entry instead.)
+    message = update.get("message")
     if not message:
         return {"ok": True}  # ignore non-message updates
 
@@ -208,14 +211,23 @@ async def _handle_receipt(chat_id: int, user_id: str, file_id: str) -> None:
         )
         return
 
-    replies = await run_in_threadpool(handlers.record_receipt, user_id, data)
-    for r in replies:
-        await telegram_client.send_message(chat_id, r["text"], r.get("reply_markup"))
+    try:
+        replies = await run_in_threadpool(handlers.record_receipt, user_id, data)
+        for r in replies:
+            await telegram_client.send_message(chat_id, r["text"], r.get("reply_markup"))
+    except Exception as exc:  # noqa: BLE001 — never leave the user without a reply
+        print(f"[receipt] recording failed: {exc}")
+        await telegram_client.send_message(chat_id, "Sorry, something went wrong. Try again.")
 
 
 async def _handle_report(chat_id: int, user_id: str) -> None:
     """Send a spending report plus a category bar chart."""
-    text, by_category = await run_in_threadpool(handlers.report_text, user_id)
+    try:
+        text, by_category = await run_in_threadpool(handlers.report_text, user_id)
+    except Exception as exc:  # noqa: BLE001 — never leave the user without a reply
+        print(f"[report] failed: {exc}")
+        await telegram_client.send_message(chat_id, "Sorry, something went wrong. Try again.")
+        return
     try:
         image = await run_in_threadpool(
             report.render_category_chart, by_category, text.splitlines()[0]
@@ -223,22 +235,29 @@ async def _handle_report(chat_id: int, user_id: str) -> None:
     except Exception as exc:  # noqa: BLE001 — chart is a nice-to-have
         print(f"[report] chart failed: {exc}")
         image = None
-    if image:
-        await telegram_client.send_photo(chat_id, image, caption=text)
-    else:
-        await telegram_client.send_message(chat_id, text)
+    try:
+        if image:
+            await telegram_client.send_photo(chat_id, image, caption=text)
+        else:
+            await telegram_client.send_message(chat_id, text)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[report] send failed: {exc}")
 
 
 async def _handle_export(chat_id: int, user_id: str) -> None:
     """Export all of the user's transactions as a CSV file."""
-    rows = await run_in_threadpool(supabase_client.list_transactions, user_id, limit=10000)
-    if not rows:
-        await telegram_client.send_message(chat_id, "Nothing to export yet.")
-        return
-    csv_bytes = await run_in_threadpool(handlers.build_transactions_csv, rows)
-    await telegram_client.send_document(
-        chat_id, "transactions.csv", csv_bytes, caption="Your transactions"
-    )
+    try:
+        rows = await run_in_threadpool(supabase_client.list_transactions, user_id, limit=10000)
+        if not rows:
+            await telegram_client.send_message(chat_id, "Nothing to export yet.")
+            return
+        csv_bytes = await run_in_threadpool(handlers.build_transactions_csv, rows)
+        await telegram_client.send_document(
+            chat_id, "transactions.csv", csv_bytes, caption="Your transactions"
+        )
+    except Exception as exc:  # noqa: BLE001 — never leave the user without a reply
+        print(f"[export] failed: {exc}")
+        await telegram_client.send_message(chat_id, "Sorry, something went wrong. Try again.")
 
 
 async def _handle_callback(cb: dict) -> None:
@@ -319,13 +338,16 @@ async def fire_reminders(
     sent = 0
     for r in due:
         chat_id = chat_of.get(r["user_id"])
+        if not chat_id:
+            # No known chat to deliver to (e.g. user row missing) — leave the
+            # reminder due rather than marking it sent/rescheduled for nothing.
+            continue
         try:
-            if chat_id:
-                await telegram_client.send_message(chat_id, "Reminder: " + r.get("text", ""))
-                sent += 1
+            await telegram_client.send_message(chat_id, "Reminder: " + r.get("text", ""))
+            sent += 1
             # Repeating reminders roll forward to their next occurrence; one-offs
             # are marked sent so they don't fire again.
-            next_at = clock.next_occurrence(r.get("remind_at"), r.get("repeat"))
+            next_at = clock.next_occurrence(r.get("remind_at"), r.get("repeat"), r.get("anchor_day"))
             if next_at:
                 await run_in_threadpool(supabase_client.reschedule_reminder, r["id"], next_at)
             else:

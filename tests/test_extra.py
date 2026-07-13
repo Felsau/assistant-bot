@@ -100,7 +100,7 @@ def test_report_text(monkeypatch):
 def test_budget_warning_triggers_at_80pct(monkeypatch):
     monkeypatch.setattr(supabase_client, "get_budgets", lambda uid: {"food": 100})
     monkeypatch.setattr(supabase_client, "list_transactions",
-                        lambda uid, start: [{"kind": "expense", "amount": 90, "category": "food"}])
+                        lambda uid, start, **kw: [{"kind": "expense", "amount": 90, "category": "food"}])
     warn = handlers.budget_warnings("u1")
     assert warn is not None
     assert "food: 90 / 100" in warn
@@ -109,5 +109,5 @@ def test_budget_warning_triggers_at_80pct(monkeypatch):
 def test_budget_warning_silent_below_threshold(monkeypatch):
     monkeypatch.setattr(supabase_client, "get_budgets", lambda uid: {"food": 100})
     monkeypatch.setattr(supabase_client, "list_transactions",
-                        lambda uid, start: [{"kind": "expense", "amount": 40, "category": "food"}])
+                        lambda uid, start, **kw: [{"kind": "expense", "amount": 40, "category": "food"}])
     assert handlers.budget_warnings("u1") is None

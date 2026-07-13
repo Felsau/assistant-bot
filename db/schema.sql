@@ -51,12 +51,14 @@ create table if not exists reminders (
   text text not null,
   remind_at timestamptz not null,
   repeat text,             -- null | 'daily' | 'weekly' | 'monthly'
+  anchor_day int,          -- original day-of-month, for 'monthly' repeats (see clock.py _add_month)
   sent boolean default false,
   created_at timestamptz default now()
 );
 create index if not exists reminders_due_idx on reminders (sent, remind_at);
--- Existing deployments: add the repeat column with
+-- Existing deployments: add the repeat/anchor_day columns with
 --   alter table reminders add column if not exists repeat text;
+--   alter table reminders add column if not exists anchor_day int;
 
 -- Recurring expenses (subscriptions, rent), posted by /cron/recurring.
 create table if not exists recurring (

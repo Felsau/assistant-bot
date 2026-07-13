@@ -71,6 +71,9 @@ def insert_task(user_id: str, data: dict) -> dict:
 
 
 def insert_transaction(user_id: str, data: dict) -> dict:
+    # An explicit null here would override the column's `default current_date`,
+    # so a transaction with no date would silently drop out of every summary
+    # (they all filter on occurred_on). Default it ourselves instead.
     row = {
         "user_id": user_id,
         "kind": data.get("kind", "expense"),
@@ -78,7 +81,7 @@ def insert_transaction(user_id: str, data: dict) -> dict:
         "currency": data.get("currency"),
         "category": data.get("category"),
         "note": data.get("note"),
-        "occurred_on": data.get("occurred_on"),
+        "occurred_on": data.get("occurred_on") or clock.today().isoformat(),
     }
     return _first(_db().table("transactions").insert(row).execute().data)
 
@@ -137,11 +140,21 @@ def search(user_id: str, table: str, column: str, q: str, limit: int = 10) -> li
 # --- reminders -------------------------------------------------------------
 
 def insert_reminder(user_id: str, data: dict) -> dict:
+    # Capture the original day-of-month so a monthly reminder set on the 31st
+    # doesn't permanently clamp to the 28th after passing through February.
+    anchor_day = None
+    remind_at = data.get("remind_at")
+    if remind_at:
+        try:
+            anchor_day = int(str(remind_at)[8:10])
+        except ValueError:
+            anchor_day = None
     row = {
         "user_id": user_id,
         "text": data.get("text", ""),
-        "remind_at": data.get("remind_at"),
+        "remind_at": remind_at,
         "repeat": data.get("repeat"),
+        "anchor_day": anchor_day,
     }
     return _first(_db().table("reminders").insert(row).execute().data)
 

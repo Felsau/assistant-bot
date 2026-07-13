@@ -52,20 +52,31 @@ def to_aware_iso(value: str | None) -> str | None:
     return dt.isoformat()
 
 
-def _add_month(dt: datetime) -> datetime:
-    """Add one calendar month, clamping the day (e.g. Jan 31 → Feb 28)."""
+def _add_month(dt: datetime, anchor_day: int | None = None) -> datetime:
+    """Add one calendar month, clamping to ``anchor_day`` (e.g. Jan 31 → Feb 28).
+
+    ``anchor_day`` is the day the reminder was originally set for. Without it
+    we'd clamp against ``dt.day``, which after a short month has itself already
+    been clamped — e.g. a "31st of every month" reminder would go
+    31 -> Feb 28 -> Mar 28 -> ... and never return to the 31st. Passing the
+    original day lets it go 31 -> Feb 28 -> Mar 31.
+    """
     month = dt.month + 1
     year = dt.year + (month - 1) // 12
     month = (month - 1) % 12 + 1
-    day = min(dt.day, calendar.monthrange(year, month)[1])
+    day = min(anchor_day or dt.day, calendar.monthrange(year, month)[1])
     return dt.replace(year=year, month=month, day=day)
 
 
-def next_occurrence(remind_at_iso: str, repeat: str | None) -> str | None:
+def next_occurrence(
+    remind_at_iso: str, repeat: str | None, anchor_day: int | None = None
+) -> str | None:
     """Next future fire time for a repeating reminder, as an ISO string.
 
     ``repeat`` is 'daily' | 'weekly' | 'monthly'. Returns None for a one-off or
-    an unknown repeat, so the caller can retire the reminder instead."""
+    an unknown repeat, so the caller can retire the reminder instead. For
+    'monthly', pass the reminder's original ``anchor_day`` so a short month
+    doesn't permanently clamp later months too (see ``_add_month``)."""
     if repeat not in ("daily", "weekly", "monthly"):
         return None
     try:
@@ -77,7 +88,7 @@ def next_occurrence(remind_at_iso: str, repeat: str | None) -> str | None:
     current = now()
     if repeat == "monthly":
         while dt <= current:
-            dt = _add_month(dt)
+            dt = _add_month(dt, anchor_day)
     else:
         step = timedelta(days=1 if repeat == "daily" else 7)
         while dt <= current:

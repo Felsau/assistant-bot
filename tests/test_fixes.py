@@ -44,7 +44,7 @@ def test_spent_excludes_foreign_currency(monkeypatch):
         {"kind": "expense", "amount": 40, "currency": "USD", "category": "food"},
         {"kind": "income", "amount": 1000},
     ]
-    monkeypatch.setattr(supabase_client, "list_transactions", lambda uid, start: rows)
+    monkeypatch.setattr(supabase_client, "list_transactions", lambda uid, start, **kw: rows)
     text = handlers.handle_message("u1", "/spent")[0]["text"]
     assert "Spent: 100" in text          # not 140 — USD is not summed in
     assert "140" not in text
@@ -54,7 +54,7 @@ def test_spent_excludes_foreign_currency(monkeypatch):
 
 def test_foreign_currency_not_counted_in_budget(monkeypatch):
     monkeypatch.setattr(supabase_client, "get_budgets", lambda uid: {"food": 100})
-    monkeypatch.setattr(supabase_client, "list_transactions", lambda uid, start: [
+    monkeypatch.setattr(supabase_client, "list_transactions", lambda uid, start, **kw: [
         {"kind": "expense", "amount": 50, "category": "food"},
         {"kind": "expense", "amount": 500, "currency": "USD", "category": "food"},
     ])
@@ -93,3 +93,79 @@ def test_already_processed_dedups_update_ids():
     assert main._already_processed(uid) is True     # redelivery
     assert main._already_processed(uid + 1) is False
     assert main._already_processed(None) is False    # no id → never dedup
+
+
+# --- missing occurred_on defaulting -----------------------------------------
+
+class _FakeTable:
+    """Minimal stand-in for the supabase query-builder chain."""
+
+    def __init__(self, captured: dict):
+        self._captured = captured
+
+    def insert(self, row):
+        self._captured.update(row)
+        return self
+
+    def execute(self):
+        return type("Res", (), {"data": [dict(self._captured, id="tx1")]})()
+
+
+class _FakeDB:
+    def __init__(self, captured: dict):
+        self._captured = captured
+
+    def table(self, name):
+        return _FakeTable(self._captured)
+
+
+def test_insert_transaction_defaults_missing_occurred_on(monkeypatch):
+    captured: dict = {}
+    monkeypatch.setattr(supabase_client, "_db", lambda: _FakeDB(captured))
+    supabase_client.insert_transaction("u1", {"kind": "expense", "amount": 60, "category": "food"})
+    # An explicit null would override the column's `default current_date`, and
+    # every summary filters on occurred_on — so a NULL date silently vanishes
+    # from /spent, /week, /report, and budget alerts.
+    assert captured["occurred_on"] == clock.today().isoformat()
+
+
+def test_insert_transaction_keeps_explicit_occurred_on(monkeypatch):
+    captured: dict = {}
+    monkeypatch.setattr(supabase_client, "_db", lambda: _FakeDB(captured))
+    supabase_client.insert_transaction("u1", {"amount": 60, "occurred_on": "2026-01-15"})
+    assert captured["occurred_on"] == "2026-01-15"
+
+
+# --- monthly reminder day drift ---------------------------------------------
+
+def test_next_occurrence_monthly_uses_anchor_day_not_clamped_day(monkeypatch):
+    from datetime import datetime
+    # Freeze "now" between Jan 31 and Feb 28 so each call only rolls forward
+    # one month, isolating the clamp-then-recover behavior we're testing.
+    monkeypatch.setattr(clock, "now", lambda: datetime.fromisoformat("2026-02-05T00:00:00+07:00"))
+    due = "2026-01-31T09:00:00+07:00"
+    next_at = clock.next_occurrence(due, "monthly", anchor_day=31)
+    assert next_at.startswith("2026-02-28")  # clamped for February
+
+    monkeypatch.setattr(clock, "now", lambda: datetime.fromisoformat("2026-03-05T00:00:00+07:00"))
+    # Roll forward again from the (clamped) Feb value, still passing anchor_day.
+    next_at2 = clock.next_occurrence(next_at, "monthly", anchor_day=31)
+    assert next_at2.startswith("2026-03-31")  # back to the real day in March
+
+
+def test_next_occurrence_monthly_without_anchor_day_stays_clamped(monkeypatch):
+    from datetime import datetime
+    monkeypatch.setattr(clock, "now", lambda: datetime.fromisoformat("2026-02-05T00:00:00+07:00"))
+    # Without an anchor_day (e.g. old rows from before the migration), the
+    # existing clamped-day behavior is preserved rather than erroring.
+    next_at = clock.next_occurrence("2026-01-31T09:00:00+07:00", "monthly")
+    assert next_at.startswith("2026-02-28")
+
+
+def test_insert_reminder_captures_anchor_day(monkeypatch):
+    captured: dict = {}
+    monkeypatch.setattr(supabase_client, "_db", lambda: _FakeDB(captured))
+    supabase_client.insert_reminder("u1", {
+        "text": "pay rent", "remind_at": "2026-01-31T09:00:00+07:00", "repeat": "monthly",
+    })
+    assert captured["anchor_day"] == 31
