@@ -7,8 +7,10 @@ Flow:
 
 from __future__ import annotations
 
+import calendar
 import os
 from collections import deque
+from datetime import timedelta
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, Header, HTTPException, Request
@@ -154,7 +156,9 @@ async def webhook(
 
     # Photos → read as a receipt and log the expense(s).
     if not text and message.get("photo"):
-        await _handle_receipt(chat_id, user_id, message["photo"][-1]["file_id"])
+        await _handle_receipt(
+            chat_id, user_id, message["photo"][-1]["file_id"], message.get("caption")
+        )
         return {"ok": True}
 
     # /report sends a chart image, so it's handled here, not via handle_message.
@@ -195,11 +199,13 @@ async def webhook(
     return {"ok": True}
 
 
-async def _handle_receipt(chat_id: int, user_id: str, file_id: str) -> None:
+async def _handle_receipt(
+    chat_id: int, user_id: str, file_id: str, caption: str | None = None
+) -> None:
     """Download a photo, read it as a receipt, and log the expense."""
     try:
         image = await telegram_client.download_file(file_id)
-        data = await run_in_threadpool(classifier.extract_receipt, image)
+        data = await run_in_threadpool(classifier.extract_receipt, image, caption=caption)
     except Exception as exc:  # noqa: BLE001
         print(f"[receipt] failed: {exc}")
         await telegram_client.send_message(chat_id, "Couldn't read that image. Type the amount instead.")
@@ -354,7 +360,38 @@ async def fire_reminders(
                 await run_in_threadpool(supabase_client.mark_reminder_sent, r["id"])
         except Exception as exc:  # noqa: BLE001
             print(f"[reminders] failed for {r.get('id')}: {exc}")
-    return {"ok": True, "sent": sent}
+
+    # Appointment heads-up: ping EVENT_LEAD_MINUTES before each event starts.
+    lead = timedelta(minutes=handlers.EVENT_LEAD_MIN)
+    events = await run_in_threadpool(
+        supabase_client.unnotified_events, (clock.now() + lead).isoformat()
+    )
+    announced = 0
+    for ev in events:
+        chat_id = chat_of.get(ev["user_id"])
+        if not chat_id:
+            continue
+        try:
+            start = clock.to_local(ev.get("starts_at"))
+            # An event more than a day past (e.g. the bot was down) is retired
+            # quietly rather than announced as "coming up".
+            if start and start < clock.now() - timedelta(hours=24):
+                await run_in_threadpool(supabase_client.mark_event_notified, ev["id"])
+                continue
+            when = ""
+            if start:
+                day = "" if start.date() == clock.today() else f"{start:%b %d} "
+                when = f" at {day}{start:%H:%M}"
+            text = f"Coming up{when}: {ev.get('title', '')}"
+            if ev.get("location"):
+                text += f" ({ev['location']})"
+            await telegram_client.send_message(chat_id, text)
+            await run_in_threadpool(supabase_client.mark_event_notified, ev["id"])
+            announced += 1
+        except Exception as exc:  # noqa: BLE001
+            print(f"[events] failed for {ev.get('id')}: {exc}")
+
+    return {"ok": True, "sent": sent, "events": announced}
 
 
 @app.post("/cron/recurring")
@@ -370,11 +407,15 @@ async def post_recurring(
     posted = 0
     recurring = await run_in_threadpool(supabase_client.all_recurring)
     for r in recurring:
-        if int(r.get("day_of_month", 1)) != today.day:
-            continue
+        day = int(r.get("day_of_month", 1))
+        if day > today.day:
+            continue  # target day hasn't arrived yet this month
         last = str(r.get("last_posted") or "")[:7]
         if last == today.strftime("%Y-%m"):
             continue  # already posted this month
+        # Catch up if a cron run was missed on the exact day, but still record
+        # the transaction against the day it was meant to occur on.
+        occurred_on = today.replace(day=min(day, calendar.monthrange(today.year, today.month)[1]))
         try:
             await run_in_threadpool(supabase_client.insert_transaction, r["user_id"], {
                 "kind": r.get("kind", "expense"),
@@ -382,7 +423,7 @@ async def post_recurring(
                 "currency": r.get("currency"),
                 "category": r.get("category"),
                 "note": r.get("note"),
-                "occurred_on": today.isoformat(),
+                "occurred_on": occurred_on.isoformat(),
             })
             await run_in_threadpool(supabase_client.mark_recurring_posted, r["id"], today.isoformat())
             posted += 1

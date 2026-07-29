@@ -60,6 +60,24 @@ create index if not exists reminders_due_idx on reminders (sent, remind_at);
 --   alter table reminders add column if not exists repeat text;
 --   alter table reminders add column if not exists anchor_day int;
 
+-- One-off appointments/meetings at a specific date and time. The
+-- /cron/reminders endpoint sends a heads-up EVENT_LEAD_MINUTES before
+-- `starts_at`, then sets `notified`. (The `schedule` table above is for
+-- weekly repeating items; this one is for dated appointments.)
+create table if not exists events (
+  id uuid primary key default gen_random_uuid(),
+  user_id text not null,
+  title text not null,
+  starts_at timestamptz not null,
+  end_at timestamptz,
+  location text,
+  notes text,
+  notified boolean default false,
+  created_at timestamptz default now()
+);
+create index if not exists events_notify_idx on events (notified, starts_at);
+create index if not exists events_user_idx on events (user_id, starts_at);
+
 -- Recurring expenses (subscriptions, rent), posted by /cron/recurring.
 create table if not exists recurring (
   id uuid primary key default gen_random_uuid(),

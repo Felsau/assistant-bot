@@ -57,11 +57,15 @@ def _remember_undo(token: str, user_id: str, table: str, row: dict) -> None:
 # assumed to be in the base currency.
 BASE_CURRENCY = os.environ.get("BASE_CURRENCY", "THB").upper()
 
+# How far ahead of an appointment the heads-up ping goes out.
+EVENT_LEAD_MIN = int(os.environ.get("EVENT_LEAD_MINUTES", "30"))
+
 START_TEXT = (
     "I sort what you send into notes, schedule, tasks, and expenses, and "
     "answer questions about them. Just write normally:\n\n"
     "wifi password is hunter2\n"
     "Math Monday 9-11 room 301\n"
+    "dentist July 20 at 2pm\n"
     "submit the report Friday\n"
     "coffee 60   /   salary 30000 in\n"
     "remind me to call the bank at 3pm\n"
@@ -83,6 +87,8 @@ HELP_TEXT = (
     "/find <text>   search notes, tasks, expenses\n"
     "/recurring   manage monthly recurring expenses\n"
     "/export   download your transactions as CSV\n\n"
+    "Appointments with a date and time (\"dentist July 20 at 2pm\") get a "
+    "heads-up ping before they start and show up in /today. "
     "Set reminders by writing \"remind me to X at 3pm\" (or \"every Monday 9am\" "
     "for a repeating one). Change saved items in words: \"change coffee to 80\", "
     "\"rename task X to Y\". Deleting anything shows an Undo button. Log money with "
@@ -169,6 +175,9 @@ def handle_message(user_id: str, text: str) -> list[dict]:
             _task_markup(row.get("id")),
         )]
 
+    if msg_type == "event":
+        return _handle_new_event(user_id, text, data)
+
     if msg_type == "reminder":
         if not data.get("remind_at"):
             row = supabase_client.insert_note(user_id, {"content": text})
@@ -210,6 +219,49 @@ def record_expense(user_id: str, data: dict) -> list[dict]:
     if alert:
         text += "\n" + alert
     return [_reply(text, _delete_markup("transactions", row.get("id")))]
+
+
+def _handle_new_event(user_id: str, text: str, data: dict) -> list[dict]:
+    """Store an appointment (date + time). Falls back to a task when the
+    classifier produced a date but no time, and to a note with neither."""
+    date_s = (data.get("date") or "").strip()
+    time_s = (data.get("start_time") or "").strip()
+
+    if not date_s or not time_s:
+        if date_s:
+            task = {"title": data.get("title") or text, "due_date": date_s}
+            row = supabase_client.insert_task(user_id, task)
+            return [_reply("Task added: " + _describe_task(task), _task_markup(row.get("id")))]
+        row = supabase_client.insert_note(user_id, {"content": text})
+        return [_reply(f"Noted: {text}", _delete_markup("notes", row.get("id")))]
+
+    event = {
+        "title": data.get("title") or text,
+        "starts_at": clock.to_aware_iso(f"{date_s} {time_s}"),
+        "end_at": clock.to_aware_iso(f"{date_s} {data['end_time']}") if data.get("end_time") else None,
+        "location": data.get("location"),
+        "notes": data.get("notes"),
+    }
+    row = supabase_client.insert_event(user_id, event)
+    reply = (
+        "Event: " + _describe_event(event)
+        + f"\nI'll ping you {EVENT_LEAD_MIN} min before."
+    )
+    return [_reply(reply, _delete_markup("events", row.get("id")))]
+
+
+def _describe_event(data: dict) -> str:
+    out = data.get("title", "(untitled)")
+    start = clock.to_local(data.get("starts_at"))
+    if start:
+        when = f"{start:%a %b %d, %H:%M}"
+        end = clock.to_local(data.get("end_at"))
+        if end:
+            when += f"-{end:%H:%M}"
+        out += f" — {when}"
+    if data.get("location"):
+        out += f", at {data['location']}"
+    return out
 
 
 def handle_callback(user_id: str, data: str) -> dict:
@@ -320,7 +372,10 @@ def _clean_changes(target: str, changes: dict) -> dict:
         if value in (None, ""):
             continue
         if key == "amount":
-            out["amount"] = _num(value)
+            try:
+                out["amount"] = float(value)
+            except (TypeError, ValueError):
+                pass  # unparseable amount — leave the existing value untouched
         elif key == "category" and target == "expense":
             out["category"] = classifier._normalize_category("expense", value)
         else:
@@ -337,6 +392,8 @@ def _describe_row(table: str, row: dict) -> str:
         return row.get("content", "")
     if table == "schedule":
         return _describe_schedule(row)
+    if table == "events":
+        return _describe_event(row)
     return str(row.get("id", ""))
 
 
@@ -353,6 +410,7 @@ def _reinsert(user_id: str, table: str, row: dict) -> None:
         "schedule": supabase_client.insert_schedule,
         "tasks": supabase_client.insert_task,
         "transactions": supabase_client.insert_transaction,
+        "events": supabase_client.insert_event,
     }
     insert = inserters.get(table)
     if insert:
@@ -368,6 +426,8 @@ def _undo_label(table: str, row: dict) -> str:
         return _describe_transaction(row)
     if table == "schedule":
         return _describe_schedule(row)
+    if table == "events":
+        return _describe_event(row)
     return "entry"
 
 
@@ -413,18 +473,18 @@ def _aggregate(rows: list[dict]) -> dict:
     """Aggregate transactions in the base currency for the given rows.
 
     Returns ``{"income", "expense", "by_category", "foreign"}`` where ``foreign``
-    maps each non-base currency to its expense total (surfaced separately, never
-    mixed into the base-currency numbers)."""
+    maps each non-base currency to its ``{"expense", "income"}`` totals
+    (surfaced separately, never mixed into the base-currency numbers)."""
     income = expense = 0.0
     by_category: dict[str, float] = {}
-    foreign: dict[str, float] = {}
+    foreign: dict[str, dict[str, float]] = {}
     for r in rows:
         amount = _num(r.get("amount"))
         is_income = r.get("kind") == "income"
         if not _is_base_currency(r):
-            if not is_income:
-                cur = (r.get("currency") or "").upper()
-                foreign[cur] = foreign.get(cur, 0) + amount
+            cur = (r.get("currency") or "").upper()
+            bucket = foreign.setdefault(cur, {"expense": 0.0, "income": 0.0})
+            bucket["income" if is_income else "expense"] += amount
             continue
         if is_income:
             income += amount
@@ -445,13 +505,19 @@ def _month_rows(user_id: str) -> list[dict]:
     return supabase_client.list_transactions(user_id, start.isoformat(), limit=_SUMMARY_LIMIT)
 
 
-def _foreign_lines(foreign: dict[str, float]) -> list[str]:
-    """Render a "not included" note for any foreign-currency spending."""
+def _foreign_lines(foreign: dict[str, dict[str, float]]) -> list[str]:
+    """Render a "not included" note for any foreign-currency activity."""
     if not foreign:
         return []
     lines = ["", "Other currencies (not included):"]
-    for cur, amt in sorted(foreign.items()):
-        lines.append(f"  {cur} {_fmt(amt)}")
+    for cur, amts in sorted(foreign.items()):
+        expense, income = amts.get("expense", 0.0), amts.get("income", 0.0)
+        if expense and income:
+            lines.append(f"  {cur} {_fmt(expense)} spent, {_fmt(income)} income")
+        elif income:
+            lines.append(f"  {cur} {_fmt(income)} income")
+        else:
+            lines.append(f"  {cur} {_fmt(expense)}")
     return lines
 
 
@@ -589,6 +655,9 @@ def _handle_find(user_id: str, q: str) -> list[dict]:
                               _delete_markup("notes", note["id"])))
     for task in supabase_client.search(user_id, "tasks", "title", q):
         replies.append(_reply("Task: " + _describe_task(task), _task_markup(task["id"])))
+    for ev in supabase_client.search(user_id, "events", "title", q):
+        replies.append(_reply("Event: " + _describe_event(ev),
+                              _delete_markup("events", ev["id"])))
     for tx in supabase_client.search(user_id, "transactions", "note", q):
         replies.append(_reply(_describe_transaction(tx),
                               _delete_markup("transactions", tx["id"])))

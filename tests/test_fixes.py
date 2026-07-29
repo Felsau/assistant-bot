@@ -169,3 +169,109 @@ def test_insert_reminder_captures_anchor_day(monkeypatch):
         "text": "pay rent", "remind_at": "2026-01-31T09:00:00+07:00", "repeat": "monthly",
     })
     assert captured["anchor_day"] == 31
+
+
+def test_next_occurrence_steps_in_local_calendar_not_utc(monkeypatch):
+    from datetime import datetime
+    # A reminder anchored on the 1st at 00:30 Bangkok local is stored by
+    # Supabase as UTC: Dec 31 2025 17:30Z. Stepping the raw UTC value would
+    # advance (year, month) from Dec 2025, landing on Jan 2026 — one local
+    # calendar month short of the correct Feb 2026 target.
+    monkeypatch.setattr(clock, "now", lambda: datetime.fromisoformat("2026-01-01T01:00:00+07:00"))
+    next_at = clock.next_occurrence("2025-12-31T17:30:00+00:00", "monthly", anchor_day=1)
+    local = datetime.fromisoformat(next_at).astimezone(clock._TZ)
+    assert (local.year, local.month, local.day) == (2026, 2, 1)
+    assert (local.hour, local.minute) == (0, 30)
+
+
+# --- recurring-expense cron catch-up ----------------------------------------
+
+def test_cron_recurring_catches_up_a_missed_day(monkeypatch):
+    import asyncio
+    from datetime import date
+
+    import main
+
+    monkeypatch.setattr(main, "_CRON_SECRET", "testsecret")
+    monkeypatch.setattr(clock, "today", lambda: date(2026, 7, 13))  # cron missed the 10th
+    monkeypatch.setattr(supabase_client, "all_recurring", lambda: [
+        {"id": "r1", "user_id": "u1", "kind": "expense", "amount": 500,
+         "currency": None, "category": "housing", "note": "rent",
+         "day_of_month": 10, "last_posted": None},
+    ])
+    inserted: dict = {}
+    posted_calls = []
+    monkeypatch.setattr(supabase_client, "insert_transaction",
+                        lambda uid, data: inserted.update(data) or {"id": "tx1"})
+    monkeypatch.setattr(supabase_client, "mark_recurring_posted",
+                        lambda rid, posted_on: posted_calls.append((rid, posted_on)))
+
+    result = asyncio.run(main.post_recurring(secret="testsecret", x_cron_secret=None))
+    assert result == {"ok": True, "posted": 1}
+    # Backdated to the intended day, not the late catch-up date.
+    assert inserted["occurred_on"] == "2026-07-10"
+    assert posted_calls == [("r1", "2026-07-13")]
+
+
+def test_cron_recurring_skips_before_target_day(monkeypatch):
+    import asyncio
+    from datetime import date
+
+    import main
+
+    monkeypatch.setattr(main, "_CRON_SECRET", "testsecret")
+    monkeypatch.setattr(clock, "today", lambda: date(2026, 7, 5))  # before the 10th
+    monkeypatch.setattr(supabase_client, "all_recurring", lambda: [
+        {"id": "r1", "user_id": "u1", "amount": 500, "day_of_month": 10, "last_posted": None},
+    ])
+    called = []
+    monkeypatch.setattr(supabase_client, "insert_transaction",
+                        lambda uid, data: called.append(data) or {"id": "tx1"})
+
+    result = asyncio.run(main.post_recurring(secret="testsecret", x_cron_secret=None))
+    assert result == {"ok": True, "posted": 0}
+    assert called == []
+
+
+# --- natural-language edit: unparseable amount ------------------------------
+
+def test_edit_amount_unparseable_is_dropped_not_zeroed(monkeypatch):
+    monkeypatch.setattr(supabase_client, "search", lambda uid, table, col, q, **kw: [
+        {"id": "tx1", "amount": 60, "category": "food", "note": "coffee"},
+    ])
+    updated = {}
+    monkeypatch.setattr(supabase_client, "update_row",
+                        lambda uid, table, rid, changes: updated.update(changes) or None)
+    handlers._handle_edit("u1", {
+        "target": "expense", "match": "coffee", "changes": {"amount": "not a number"},
+    })
+    # The bad amount must be dropped, not silently coerced to 0.
+    assert "amount" not in updated
+
+
+# --- foreign-currency income surfaced ---------------------------------------
+
+def test_foreign_income_is_surfaced_not_dropped(monkeypatch):
+    rows = [
+        {"kind": "income", "amount": 2000, "currency": "USD"},
+    ]
+    monkeypatch.setattr(supabase_client, "list_transactions", lambda uid, start, **kw: rows)
+    text = handlers.handle_message("u1", "/spent")[0]["text"]
+    assert "Other currencies (not included):" in text
+    assert "USD 2,000 income" in text
+
+
+# --- Telegram empty message guard -------------------------------------------
+
+def test_send_message_never_sends_empty_text(monkeypatch):
+    import asyncio
+
+    posts = []
+
+    async def fake_post(method, payload):
+        posts.append(payload)
+        return {}
+
+    monkeypatch.setattr(telegram_client, "_post", fake_post)
+    asyncio.run(telegram_client.send_message(123, ""))
+    assert posts and posts[0]["text"] == " "

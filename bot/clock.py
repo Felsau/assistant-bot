@@ -52,6 +52,20 @@ def to_aware_iso(value: str | None) -> str | None:
     return dt.isoformat()
 
 
+def to_local(value) -> datetime | None:
+    """Parse an ISO datetime string into the configured timezone.
+
+    Supabase returns timestamptz values in UTC; anything shown to the user or
+    stepped through calendar math should be converted to local time first.
+    Naive values are assumed to already be local. Returns None if unparseable.
+    """
+    try:
+        dt = datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+    return dt.replace(tzinfo=_TZ) if dt.tzinfo is None else dt.astimezone(_TZ)
+
+
 def _add_month(dt: datetime, anchor_day: int | None = None) -> datetime:
     """Add one calendar month, clamping to ``anchor_day`` (e.g. Jan 31 → Feb 28).
 
@@ -79,12 +93,11 @@ def next_occurrence(
     doesn't permanently clamp later months too (see ``_add_month``)."""
     if repeat not in ("daily", "weekly", "monthly"):
         return None
-    try:
-        dt = datetime.fromisoformat(str(remind_at_iso))
-    except (TypeError, ValueError):
+    # Step in the user's local calendar (not UTC) so "1st of every month,
+    # 00:30" in Bangkok doesn't roll over on the UTC day boundary and drift.
+    dt = to_local(remind_at_iso)
+    if dt is None:
         return None
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=_TZ)
     current = now()
     if repeat == "monthly":
         while dt <= current:

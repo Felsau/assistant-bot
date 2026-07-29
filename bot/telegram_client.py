@@ -47,8 +47,11 @@ async def send_message(
     """Send a text message, optionally with an inline keyboard.
 
     Long text is split into several messages to stay under Telegram's 4096-char
-    limit; the keyboard (if any) is attached to the final chunk only."""
+    limit; the keyboard (if any) is attached to the final chunk only. Telegram
+    rejects an empty message body, so a blank ``text`` falls back to a single
+    space rather than erroring."""
     chunks = _split_message(text or "") or [""]
+    chunks = [c or " " for c in chunks]
     last = len(chunks) - 1
     for i, chunk in enumerate(chunks):
         payload: dict = {"chat_id": chat_id, "text": chunk}

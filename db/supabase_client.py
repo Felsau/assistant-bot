@@ -70,6 +70,20 @@ def insert_task(user_id: str, data: dict) -> dict:
     return _first(_db().table("tasks").insert(row).execute().data)
 
 
+def insert_event(user_id: str, data: dict) -> dict:
+    row = {
+        "user_id": user_id,
+        "title": data.get("title", ""),
+        "starts_at": data.get("starts_at"),
+        "end_at": data.get("end_at"),
+        "location": data.get("location"),
+        "notes": data.get("notes"),
+        # Kept on re-insert (Undo) so a restored past event isn't re-announced.
+        "notified": data.get("notified", False),
+    }
+    return _first(_db().table("events").insert(row).execute().data)
+
+
 def insert_transaction(user_id: str, data: dict) -> dict:
     # An explicit null here would override the column's `default current_date`,
     # so a transaction with no date would silently drop out of every summary
@@ -123,7 +137,7 @@ def set_task_due(user_id: str, task_id: str, due_date: str) -> dict | None:
 
 def search(user_id: str, table: str, column: str, q: str, limit: int = 10) -> list[dict]:
     """Case-insensitive substring search within one column the user owns."""
-    if table not in ("notes", "schedule", "tasks", "transactions"):
+    if table not in ("notes", "schedule", "tasks", "transactions", "events"):
         return []
     return (
         _db()
@@ -180,6 +194,27 @@ def due_reminders(before_iso: str, limit: int = 100) -> list[dict]:
 
 def mark_reminder_sent(reminder_id: str) -> None:
     _db().table("reminders").update({"sent": True}).eq("id", reminder_id).execute()
+
+
+# --- events (appointments) ---------------------------------------------------
+
+def unnotified_events(before_iso: str, limit: int = 100) -> list[dict]:
+    """Events that start before ``before_iso`` and haven't been announced yet."""
+    return (
+        _db()
+        .table("events")
+        .select("*")
+        .eq("notified", False)
+        .lte("starts_at", before_iso)
+        .order("starts_at")
+        .limit(limit)
+        .execute()
+        .data
+    )
+
+
+def mark_event_notified(event_id: str) -> None:
+    _db().table("events").update({"notified": True}).eq("id", event_id).execute()
 
 
 # --- recurring expenses ----------------------------------------------------
@@ -290,7 +325,7 @@ def delete_row(user_id: str, table: str, row_id: str) -> dict | None:
 
     Returns the deleted row (so it can be restored via Undo), or None if the
     table is unknown or nothing matched."""
-    if table not in ("notes", "schedule", "tasks", "transactions"):
+    if table not in ("notes", "schedule", "tasks", "transactions", "events"):
         return None
     res = (
         _db()
@@ -354,6 +389,30 @@ def query(user_id: str, scope: str = "all") -> dict:
             .execute()
             .data
         )
+
+    if scope in ("today", "week", "schedule", "all"):
+        # Appointments from the start of the local day (bounded for today/week;
+        # otherwise just the next 20 upcoming).
+        day_start = clock.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        ev = (
+            db.table("events")
+            .select("*")
+            .eq("user_id", user_id)
+            .gte("starts_at", day_start.isoformat())
+            .order("starts_at")
+        )
+        if scope in ("today", "week"):
+            horizon = day_start + timedelta(days=1 if scope == "today" else 7)
+            ev = ev.lt("starts_at", horizon.isoformat())
+        rows = ev.limit(20).execute().data
+        # Supabase returns timestamptz in UTC; convert to local so whoever
+        # formats these rows (Claude, /today, the digest) shows the right time.
+        for row in rows:
+            for col in ("starts_at", "end_at"):
+                local = clock.to_local(row.get(col))
+                if local:
+                    row[col] = local.isoformat()
+        result["events"] = rows
 
     if scope in ("expenses", "all"):
         start = clock.today().replace(day=1).isoformat()

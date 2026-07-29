@@ -23,6 +23,8 @@ def test_find_across_tables(monkeypatch):
         return {
             "notes": [{"id": "n1", "content": "bank pin 1234"}],
             "tasks": [{"id": "t1", "title": "call bank"}],
+            "events": [{"id": "e1", "title": "bank meeting",
+                        "starts_at": "2026-07-20T07:00:00+00:00"}],
             "transactions": [],
         }[table]
     monkeypatch.setattr(supabase_client, "search", fake_search)
@@ -30,6 +32,7 @@ def test_find_across_tables(monkeypatch):
     texts = " ".join(r["text"] for r in replies)
     assert "Note: bank pin 1234" in texts
     assert "Task: call bank" in texts
+    assert "Event: bank meeting" in texts
 
 
 def test_recurring_add(monkeypatch):

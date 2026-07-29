@@ -99,6 +99,15 @@ Types and their data fields:
                      "due_date": "YYYY-MM-DD"|null,
                      "priority": "low"|"normal"|"high"}}
 
+- "event"    a one-off appointment or meeting at a specific date AND time
+             (doctor, dentist, meeting someone, a call, a viewing).
+             data: {{"title": string,
+                     "date": "YYYY-MM-DD",
+                     "start_time": "HH:MM",         // 24h
+                     "end_time": "HH:MM"|null,      // 24h
+                     "location": string|null,
+                     "notes": string|null}}
+
 - "expense"  money spent or received (bookkeeping).
              data: {{"kind": "expense"|"income",
                      "amount": number,
@@ -129,6 +138,11 @@ Rules:
 - A "reminder" has an explicit time to ping the user ("remind me to X at/in ...").
   A "task" is a to-do, possibly with a due date but no ping time. If the message
   asks to be reminded at a time, it is a "reminder".
+- An "event" is a one-off appointment on a specific DATE with a TIME ("dentist
+  Tuesday 2pm", "meeting with the bank July 20 10:00"). A "schedule" item
+  repeats weekly and has a day of week, not a date. An appointment with a date
+  but NO stated time is a "task" with that due_date. "Remind me..." wording is
+  still a "reminder", even about an appointment.
 - A repeating reminder ("every day", "every Monday", "each month") sets "repeat"
   and "remind_at" to the FIRST/next occurrence. "every Monday 9am" → remind_at is
   the next Monday 09:00, repeat "weekly". A one-off reminder has repeat null.
@@ -227,9 +241,13 @@ You read a photo of a receipt or bill and return ONLY a JSON object, no prose:
 """
 
 
-def extract_receipt(image_bytes: bytes, media_type: str = "image/jpeg") -> dict:
+def extract_receipt(
+    image_bytes: bytes, media_type: str = "image/jpeg", caption: str | None = None
+) -> dict:
     """Read a receipt photo and return expense data (``amount`` may be None).
 
+    ``caption`` is any text the user sent alongside the photo (e.g. "team
+    lunch") — passed to Claude as a hint and used as a note fallback.
     May include an ``items`` list when the receipt is worth splitting.
     """
     system = _RECEIPT_SYSTEM.format(
@@ -237,6 +255,13 @@ def extract_receipt(image_bytes: bytes, media_type: str = "image/jpeg") -> dict:
         expense_categories=", ".join(EXPENSE_CATEGORIES),
     )
     b64 = base64.standard_b64encode(image_bytes).decode("ascii")
+
+    instruction = "Extract this receipt as JSON."
+    if caption:
+        instruction += (
+            f' The user captioned the photo: "{caption}" — use it as a hint '
+            "for note/category if the receipt itself is ambiguous."
+        )
 
     response = _client().messages.create(
         model=_MODEL,
@@ -246,7 +271,7 @@ def extract_receipt(image_bytes: bytes, media_type: str = "image/jpeg") -> dict:
             "role": "user",
             "content": [
                 {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": b64}},
-                {"type": "text", "text": "Extract this receipt as JSON."},
+                {"type": "text", "text": instruction},
             ],
         }],
     )
@@ -257,6 +282,8 @@ def extract_receipt(image_bytes: bytes, media_type: str = "image/jpeg") -> dict:
         return {"amount": None}
     data["kind"] = "expense"
     data["category"] = _normalize_category("expense", data.get("category"))
+    if caption and not data.get("note"):
+        data["note"] = caption
     items = data.get("items")
     if isinstance(items, list):
         for it in items:
